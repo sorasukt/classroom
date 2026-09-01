@@ -34,14 +34,11 @@
 
    จากนั้นแก้ `AUTH0_DOMAIN` และ `AUTH0_CLIENT_ID` ใน `wrangler.toml`
 
-4. ตั้ง Auth0 Client Secret และ Session Secret เป็น Worker secrets
+4. ตั้ง Auth0 Client Secret เป็น Worker secret
 
    ```bash
    npx wrangler secret put AUTH0_CLIENT_SECRET
-   npx wrangler secret put SESSION_SECRET
    ```
-
-   `SESSION_SECRET` ควรเป็นค่าสุ่มที่ยาวอย่างน้อย 32 ไบต์
 
 5. Deploy
 
@@ -49,7 +46,7 @@
    npx wrangler deploy
    ```
 
-ตาราง D1 จะถูกสร้างโดยอัตโนมัติเมื่อ Worker รับคำขอครั้งแรก ระบบจะไม่เปิดให้เข้าถึงข้อมูลหากการตั้งค่า Auth0 หรือ `SESSION_SECRET` ยังไม่ครบ
+ตาราง D1 จะถูกสร้างโดยอัตโนมัติเมื่อ Worker รับคำขอครั้งแรก ระบบจะไม่เปิดให้เข้าถึงข้อมูลหากการตั้งค่า Auth0 ยังไม่ครบ
 
 ## Local development
 
@@ -70,11 +67,10 @@ Workflow `.github/workflows/deploy.yml` จะตรวจ syntax ในทุ�
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
 - `AUTH0_CLIENT_SECRET`
-- `SESSION_SECRET`
 
 ### Variables
 
 - `D1_DATABASE_ID`
 - `AUTH0_CLIENT_ID`
 
-Workflow จะส่ง `AUTH0_CLIENT_SECRET` และ `SESSION_SECRET` ไปเก็บเป็น Cloudflare Worker Secrets ก่อน Deploy โดยอัตโนมัติ
+Workflow จะส่ง `AUTH0_CLIENT_SECRET` ไปเก็บเป็น Cloudflare Worker Secret ก่อน Deploy โดยอัตโนมัติ ส่วนกุญแจลงนาม session จะถูกสร้างแบบแยกบริบทจาก Client Secret ภายใน Worker และไม่ต้องตั้งค่าเพิ่ม
