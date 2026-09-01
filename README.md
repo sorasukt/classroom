@@ -83,7 +83,7 @@ Workflow `.github/workflows/deploy.yml` จะตรวจ syntax, migration แ
 - `D1_DATABASE_ID`
 - `AUTH0_CLIENT_ID`
 
-Workflow จะส่ง `AUTH0_CLIENT_SECRET` ไปเก็บเป็น Cloudflare Worker Secret ก่อน Deploy โดยอัตโนมัติ ส่วนกุญแจลงนาม session จะถูกสร้างแบบแยกบริบทจาก Client Secret ภายใน Worker และไม่ต้องตั้งค่าเพิ่ม
+Workflow จะเรียก Wrangler โดยตรงเพื่อส่ง `AUTH0_CLIENT_SECRET` ไปเก็บเป็น Cloudflare Worker Secret ก่อน Deploy โดยอัตโนมัติ ส่วนกุญแจลงนาม session จะถูกสร้างแบบแยกบริบทจาก Client Secret ภายใน Worker และไม่ต้องตั้งค่าเพิ่ม
 
 ## Domains
 
