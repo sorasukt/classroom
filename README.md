@@ -58,3 +58,23 @@ npx wrangler dev
 ```
 
 การเรียก `/api/bootstrap` จะตรวจสอบความพร้อมของฐานข้อมูล ส่วนตารางทั้งหมดจะถูกสร้างอัตโนมัติจาก Worker
+
+## GitHub Actions
+
+Workflow `.github/workflows/deploy.yml` จะตรวจ syntax ในทุก Pull Request และ Deploy ไป Cloudflare อัตโนมัติเมื่อ push หรือ merge เข้า `main` รวมถึงรองรับการกด Run workflow เอง
+
+เพิ่มค่าที่ `Settings → Secrets and variables → Actions` ดังนี้
+
+### Secrets
+
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+- `AUTH0_CLIENT_SECRET`
+- `SESSION_SECRET`
+
+### Variables
+
+- `D1_DATABASE_ID`
+- `AUTH0_CLIENT_ID`
+
+Workflow จะส่ง `AUTH0_CLIENT_SECRET` และ `SESSION_SECRET` ไปเก็บเป็น Cloudflare Worker Secrets ก่อน Deploy โดยอัตโนมัติ
