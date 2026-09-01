@@ -38,26 +38,26 @@ async function handleApi(request, env, ctx, url) {
   if (path === "/api/bootstrap" && method === "GET") return bootstrap(env.DB);
   if (path === "/api/dashboard" && method === "GET") return dashboard(env.DB);
   if (path === "/api/classrooms" && method === "GET") return listClassrooms(env.DB);
-  if (path === "/api/classrooms" && method === "POST") return createClassroom(request, env.DB);
+  if (path === "/api/classrooms" && method === "POST") return createClassroom(request, env, ctx);
   if (/^\/api\/classrooms\/\d+$/.test(path) && method === "DELETE") {
-    return deleteClassroom(env.DB, Number(path.split("/").pop()));
+    return deleteClassroom(env, ctx, Number(path.split("/").pop()));
   }
   if (path === "/api/students" && method === "GET") return listStudents(env.DB, url);
-  if (path === "/api/students" && method === "POST") return createStudent(request, env.DB);
+  if (path === "/api/students" && method === "POST") return createStudent(request, env, ctx);
   if (/^\/api\/students\/\d+$/.test(path) && method === "DELETE") {
-    return deleteStudent(env.DB, Number(path.split("/").pop()));
+    return deleteStudent(env, ctx, Number(path.split("/").pop()));
   }
   if (/^\/api\/students\/\d+\/history$/.test(path) && method === "GET") {
     return studentHistory(env.DB, Number(path.split("/")[3]));
   }
   if (path === "/api/attendance" && method === "GET") return getAttendance(env.DB, url);
-  if (path === "/api/attendance" && method === "POST") return saveAttendance(request, env.DB);
+  if (path === "/api/attendance" && method === "POST") return saveAttendance(request, env, ctx);
   if (path === "/api/lessons" && method === "GET") return listLessons(env.DB, url);
-  if (path === "/api/lessons" && method === "POST") return saveLesson(request, env.DB);
+  if (path === "/api/lessons" && method === "POST") return saveLesson(request, env, ctx);
   if (/^\/api\/lessons\/\d+$/.test(path) && method === "DELETE") {
-    return deleteLesson(env.DB, Number(path.split("/").pop()));
+    return deleteLesson(env, ctx, Number(path.split("/").pop()));
   }
-  if (path === "/api/share" && method === "POST") return createShare(request, env.DB, url.origin);
+  if (path === "/api/share" && method === "POST") return createShare(request, env, ctx, url.origin);
   if (path === "/api/export.csv" && method === "GET") return exportCsv(env, ctx, url);
 
   return json({ error: "ไม่พบรายการที่ร้องขอ" }, 404);
@@ -344,17 +344,21 @@ async function listClassrooms(db) {
   return json(result.results);
 }
 
-async function createClassroom(request, db) {
+async function createClassroom(request, env, ctx) {
   const body = await readBody(request);
   const name = clean(body.name, 100);
   if (!name) return json({ error: "กรุณากรอกชื่อห้องเรียน" }, 400);
-  const result = await db.prepare(`INSERT INTO classrooms(name, code, room, schedule_days, start_time) VALUES(?,?,?,?,?) RETURNING *`)
+  const result = await env.DB.prepare(`INSERT INTO classrooms(name, code, room, schedule_days, start_time) VALUES(?,?,?,?,?) RETURNING *`)
     .bind(name, clean(body.code, 30), clean(body.room, 60), normalizeDays(body.schedule_days), clean(body.start_time, 5)).first();
+  archiveMutation(env, ctx, "classroom.created", result);
   return json(result, 201);
 }
 
-async function deleteClassroom(db, id) {
-  await db.prepare("DELETE FROM classrooms WHERE id=?").bind(id).run();
+async function deleteClassroom(env, ctx, id) {
+  const existing = await env.DB.prepare("SELECT * FROM classrooms WHERE id=?").bind(id).first();
+  if (!existing) return json({ error: "ไม่พบห้องเรียน" }, 404);
+  await env.DB.prepare("DELETE FROM classrooms WHERE id=?").bind(id).run();
+  archiveMutation(env, ctx, "classroom.deleted", existing);
   return json({ ok: true });
 }
 
@@ -372,18 +376,22 @@ async function listStudents(db, url) {
   return json(result.results);
 }
 
-async function createStudent(request, db) {
+async function createStudent(request, env, ctx) {
   const body = await readBody(request);
   const classroomId = positiveInt(body.classroom_id);
   const name = clean(body.name, 120);
   if (!classroomId || !name) return json({ error: "ข้อมูลนักเรียนไม่ครบถ้วน" }, 400);
-  const result = await db.prepare("INSERT INTO students(classroom_id, student_no, name, note) VALUES(?,?,?,?) RETURNING *")
+  const result = await env.DB.prepare("INSERT INTO students(classroom_id, student_no, name, note) VALUES(?,?,?,?) RETURNING *")
     .bind(classroomId, clean(body.student_no, 20), name, clean(body.note, 250)).first();
+  archiveMutation(env, ctx, "student.created", result);
   return json(result, 201);
 }
 
-async function deleteStudent(db, id) {
-  await db.prepare("DELETE FROM students WHERE id=?").bind(id).run();
+async function deleteStudent(env, ctx, id) {
+  const existing = await env.DB.prepare("SELECT * FROM students WHERE id=?").bind(id).first();
+  if (!existing) return json({ error: "ไม่พบนักเรียน" }, 404);
+  await env.DB.prepare("DELETE FROM students WHERE id=?").bind(id).run();
+  archiveMutation(env, ctx, "student.deleted", existing);
   return json({ ok: true });
 }
 
@@ -410,20 +418,24 @@ async function getAttendance(db, url) {
   return json({ classroom, date, students: students.results });
 }
 
-async function saveAttendance(request, db) {
+async function saveAttendance(request, env, ctx) {
   const body = await readBody(request);
   const classroomId = positiveInt(body.classroom_id);
   const date = validDate(body.date);
   if (!classroomId || !date || !Array.isArray(body.records)) return json({ error: "ข้อมูลการเช็คชื่อไม่ถูกต้อง" }, 400);
-  const session = await db.prepare(`INSERT INTO attendance_sessions(classroom_id, session_date, note) VALUES(?,?,?)
+  const session = await env.DB.prepare(`INSERT INTO attendance_sessions(classroom_id, session_date, note) VALUES(?,?,?)
     ON CONFLICT(classroom_id,session_date) DO UPDATE SET note=excluded.note RETURNING id`).bind(classroomId, date, clean(body.note, 250)).first();
   const valid = new Set(["present", "late", "absent", "leave"]);
   const records = body.records.filter((r) => positiveInt(r.student_id) && valid.has(r.status));
   if (records.length) {
-    await db.batch(records.map((r) => db.prepare(`INSERT INTO attendance(session_id, student_id, status, note, updated_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP)
+    await env.DB.batch(records.map((r) => env.DB.prepare(`INSERT INTO attendance(session_id, student_id, status, note, updated_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP)
       ON CONFLICT(session_id,student_id) DO UPDATE SET status=excluded.status,note=excluded.note,updated_at=CURRENT_TIMESTAMP`)
       .bind(session.id, positiveInt(r.student_id), r.status, clean(r.note, 250))));
   }
+  const stored = await env.DB.prepare(`SELECT student_id,status,note,updated_at FROM attendance WHERE session_id=? ORDER BY student_id`).bind(session.id).all();
+  const snapshot = { classroom_id: classroomId, session_id: session.id, date, note: clean(body.note, 250), records: stored.results };
+  archiveMutation(env, ctx, "attendance.saved", snapshot);
+  archiveAttendanceSnapshot(env, ctx, snapshot);
   return json({ ok: true, saved: records.length });
 }
 
@@ -434,7 +446,7 @@ async function listLessons(db, url) {
   return json(result.results);
 }
 
-async function saveLesson(request, db) {
+async function saveLesson(request, env, ctx) {
   const body = await readBody(request);
   const classroomId = positiveInt(body.classroom_id);
   const lessonDate = validDate(body.lesson_date);
@@ -443,28 +455,33 @@ async function saveLesson(request, db) {
   const fields = [classroomId, lessonDate, topic, clean(body.objectives, 3000), clean(body.materials, 2000), clean(body.notes, 3000)];
   const id = positiveInt(body.id);
   if (id) {
-    const result = await db.prepare(`UPDATE lesson_plans SET classroom_id=?,lesson_date=?,topic=?,objectives=?,materials=?,notes=?,updated_at=CURRENT_TIMESTAMP WHERE id=? RETURNING *`)
+    const result = await env.DB.prepare(`UPDATE lesson_plans SET classroom_id=?,lesson_date=?,topic=?,objectives=?,materials=?,notes=?,updated_at=CURRENT_TIMESTAMP WHERE id=? RETURNING *`)
       .bind(...fields, id).first();
     if (!result) return json({ error: "ไม่พบแผนการสอน" }, 404);
+    archiveMutation(env, ctx, "lesson.updated", result);
     return json(result);
   }
-  const result = await db.prepare(`INSERT INTO lesson_plans(classroom_id,lesson_date,topic,objectives,materials,notes) VALUES(?,?,?,?,?,?) RETURNING *`).bind(...fields).first();
+  const result = await env.DB.prepare(`INSERT INTO lesson_plans(classroom_id,lesson_date,topic,objectives,materials,notes) VALUES(?,?,?,?,?,?) RETURNING *`).bind(...fields).first();
+  archiveMutation(env, ctx, "lesson.created", result);
   return json(result, 201);
 }
 
-async function deleteLesson(db, id) {
-  await db.prepare("DELETE FROM lesson_plans WHERE id=?").bind(id).run();
+async function deleteLesson(env, ctx, id) {
+  const existing = await env.DB.prepare("SELECT * FROM lesson_plans WHERE id=?").bind(id).first();
+  if (!existing) return json({ error: "ไม่พบแผนการสอน" }, 404);
+  await env.DB.prepare("DELETE FROM lesson_plans WHERE id=?").bind(id).run();
+  archiveMutation(env, ctx, "lesson.deleted", existing);
   return json({ ok: true });
 }
 
-async function createShare(request, db, origin) {
+async function createShare(request, env, ctx, origin) {
   const body = await readBody(request);
   const classroomId = positiveInt(body.classroom_id);
   const date = validDate(body.date) || bangkokDate();
   if (!classroomId) return json({ error: "ไม่พบห้องเรียน" }, 400);
-  const classroom = await db.prepare("SELECT name FROM classrooms WHERE id=?").bind(classroomId).first();
+  const classroom = await env.DB.prepare("SELECT name FROM classrooms WHERE id=?").bind(classroomId).first();
   if (!classroom) return json({ error: "ไม่พบห้องเรียน" }, 404);
-  const records = await db.prepare(`SELECT s.name, s.student_no, COALESCE(a.status,'') status
+  const records = await env.DB.prepare(`SELECT s.name, s.student_no, COALESCE(a.status,'') status
     FROM students s LEFT JOIN attendance_sessions ss ON ss.classroom_id=s.classroom_id AND ss.session_date=?
     LEFT JOIN attendance a ON a.session_id=ss.id AND a.student_id=s.id WHERE s.classroom_id=? ORDER BY CAST(s.student_no AS INTEGER),s.name`).bind(date, classroomId).all();
   const counts = { present: 0, late: 0, absent: 0, leave: 0, unmarked: 0 };
@@ -472,7 +489,8 @@ async function createShare(request, db, origin) {
   const payload = { classroom: classroom.name, date, counts, records: records.results };
   const token = crypto.randomUUID().replaceAll("-", "");
   const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-  await db.prepare("INSERT INTO share_links(token,payload,expires_at) VALUES(?,?,?)").bind(token, JSON.stringify(payload), expires).run();
+  await env.DB.prepare("INSERT INTO share_links(token,payload,expires_at) VALUES(?,?,?)").bind(token, JSON.stringify(payload), expires).run();
+  archiveMutation(env, ctx, "share.created", { token, expires_at: expires, ...payload });
   const shareUrl = `${origin}/share/${token}`;
   return json({ url: shareUrl, lineUrl: `https://line.me/R/share?text=${encodeURIComponent(`สรุปการเช็คชื่อ ${classroom.name} วันที่ ${formatThaiDate(date)}\n${shareUrl}`)}` });
 }
@@ -504,8 +522,34 @@ async function exportCsv(env, ctx, url) {
   const lines = [header, ...rows.results.map((r) => [r.student_no, r.name, r.session_date || "", labels[r.status] || "ยังไม่มีประวัติ", r.note || ""])];
   const csv = "\uFEFF" + lines.map((row) => row.map(csvCell).join(",")).join("\r\n");
   const filename = `attendance-${classroomId}-${bangkokDate()}.csv`;
-  if (env.EXPORTS) ctx.waitUntil(env.EXPORTS.put(`exports/${filename}`, csv, { httpMetadata: { contentType: "text/csv; charset=utf-8" } }));
+  if (env.EXPORTS) {
+    const key = `exports/${filename}`;
+    queueR2(ctx, env.EXPORTS.put(key, csv, { httpMetadata: { contentType: "text/csv; charset=utf-8" } }), key);
+  }
   return new Response(csv, { headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="${filename}"`, "cache-control": "no-store" } });
+}
+
+function archiveMutation(env, ctx, type, payload) {
+  if (!env.EXPORTS) return;
+  const savedAt = new Date().toISOString();
+  const key = `audit/${bangkokDate()}/${Date.now()}-${crypto.randomUUID()}-${type}.json`;
+  queueR2(ctx, env.EXPORTS.put(key, JSON.stringify({ type, saved_at: savedAt, payload }, null, 2), {
+    httpMetadata: { contentType: "application/json; charset=utf-8" },
+  }), key);
+}
+
+function archiveAttendanceSnapshot(env, ctx, snapshot) {
+  if (!env.EXPORTS) return;
+  const key = `snapshots/attendance/${snapshot.classroom_id}/${snapshot.date}.json`;
+  const body = JSON.stringify({ saved_at: new Date().toISOString(), ...snapshot }, null, 2);
+  queueR2(ctx, env.EXPORTS.put(key, body, {
+    httpMetadata: { contentType: "application/json; charset=utf-8" },
+  }), key);
+}
+
+function queueR2(ctx, promise, key) {
+  const task = promise.catch((error) => console.error(`R2 archive failed: ${key}`, error));
+  if (ctx?.waitUntil) ctx.waitUntil(task);
 }
 
 function csvCell(value) { return `"${String(value ?? "").replaceAll('"', '""')}"`; }
