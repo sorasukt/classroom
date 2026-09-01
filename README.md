@@ -1,6 +1,6 @@
 # /sorasukt Classroom
 
-ระบบเช็คชื่อนักเรียนสำหรับครูบน Cloudflare Workers ใช้หน้าเว็บ HTML/CSS/JS แบบไฟล์เดียวภายใน `worker.js` พร้อม API ใน Worker เดียวกัน
+ระบบเช็คชื่อนักเรียนสำหรับครู โดย Host หน้าเว็บ `index.html` ผ่าน GitHub Pages และใช้ Cloudflare Worker สำหรับ API, Auth0 callback, D1 และ R2 เท่านั้น
 
 ## ความสามารถ
 
@@ -29,8 +29,8 @@
 3. สร้าง Auth0 Application ประเภท **Regular Web Application** แล้วตั้งค่า:
 
    - Allowed Callback URLs: `https://classroom.sorasukt.com/api/auth/callback`
-   - Allowed Logout URLs: `https://classroom.sorasukt.com`
-   - Allowed Web Origins: `https://classroom.sorasukt.com`
+   - Allowed Logout URLs: `https://sorasukt.github.io/classroom/`
+   - Allowed Web Origins: `https://sorasukt.github.io`
 
    จากนั้นแก้ `AUTH0_DOMAIN` และ `AUTH0_CLIENT_ID` ใน `wrangler.toml`
 
@@ -77,6 +77,7 @@ Workflow จะส่ง `AUTH0_CLIENT_SECRET` ไปเก็บเป็น Cl
 
 ## Domains
 
-- Application และ API Worker: `https://classroom.sorasukt.com`
+- Frontend (GitHub Pages): `https://sorasukt.github.io/classroom/`
+- API Worker: `https://classroom.sorasukt.com`
 - Auth0 Universal Login: `https://auth.sorasukt.com`
 - Auth0 callback: `https://classroom.sorasukt.com/api/auth/callback`
