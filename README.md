@@ -1,6 +1,6 @@
 # /sorasukt Classroom
 
-ระบบเช็คชื่อนักเรียนสำหรับครูบน Cloudflare Workers ใช้หน้าเว็บ HTML/CSS/JS แบบไฟล์เดียวภายใน `worker.js` พร้อม API ใน Worker เดียวกัน
+ระบบเช็คชื่อนักเรียนสำหรับครู โดย Host หน้าเว็บ `index.html` ผ่าน GitHub Pages และใช้ Cloudflare Worker สำหรับ API, Auth0 callback, D1 และ R2 เท่านั้น
 
 ## ความสามารถ
 
@@ -12,8 +12,18 @@
 - ส่งออก CSV แบบ UTF-8 BOM รองรับภาษาไทยใน Excel
 - สร้างลิงก์สรุปรายวันและแชร์ผ่าน LINE
 - Responsive พร้อม bottom navigation บนมือถือ
-- D1 สำหรับข้อมูล และ R2 สำหรับเก็บสำเนาไฟล์ CSV ที่ส่งออก
-- Auth0 Universal Login พร้อม session แบบ HttpOnly
+- D1 เป็นฐานข้อมูลหลัก และ R2 เก็บ audit, snapshot การเช็คชื่อ และสำเนา CSV
+- Auth0 Universal Login พร้อม signed session สำหรับเว็บ GitHub Pages
+
+## การจัดเก็บข้อมูล
+
+- **D1 (ข้อมูลหลัก):** ห้องเรียน นักเรียน การเช็คชื่อ แผนการสอน และลิงก์แชร์ ระบบอ่านข้อมูลสำหรับหน้าเว็บและรายงานจาก D1
+- **R2 (สำเนาและไฟล์):** เป็น bucket แบบ private ที่เข้าถึงผ่าน Worker binding เท่านั้น
+  - `audit/YYYY-MM-DD/*.json` เก็บเหตุการณ์สร้าง แก้ไข ลบ และแชร์ เพื่อใช้ตรวจสอบย้อนหลัง
+  - `snapshots/attendance/{classroom_id}/{date}.json` เก็บภาพล่าสุดของการเช็คชื่อแต่ละวัน
+  - `exports/*.csv` เก็บสำเนา CSV ที่ผู้ใช้ส่งออก
+
+Worker จะบันทึก D1 ให้สำเร็จก่อน แล้วจึงส่งงานสำเนาไป R2 แบบ background ดังนั้น R2 ขัดข้องชั่วคราวจะไม่ทำให้การเช็คชื่อใน D1 สูญหาย ข้อมูลนักเรียนใน R2 ไม่ได้เปิดเป็น public URL
 
 ## ติดตั้ง
 
@@ -28,9 +38,9 @@
 
 3. สร้าง Auth0 Application ประเภท **Regular Web Application** แล้วตั้งค่า:
 
-   - Allowed Callback URLs: `https://YOUR_DOMAIN/api/auth/callback`
-   - Allowed Logout URLs: `https://YOUR_DOMAIN`
-   - Allowed Web Origins: `https://YOUR_DOMAIN`
+   - Allowed Callback URLs: `https://classroom.sorasukt.com/api/auth/callback`
+   - Allowed Logout URLs: `https://sorasukt.github.io/classroom/`
+   - Allowed Web Origins: `https://sorasukt.github.io`
 
    จากนั้นแก้ `AUTH0_DOMAIN` และ `AUTH0_CLIENT_ID` ใน `wrangler.toml`
 
@@ -74,3 +84,10 @@ Workflow `.github/workflows/deploy.yml` จะตรวจ syntax ในทุ�
 - `AUTH0_CLIENT_ID`
 
 Workflow จะส่ง `AUTH0_CLIENT_SECRET` ไปเก็บเป็น Cloudflare Worker Secret ก่อน Deploy โดยอัตโนมัติ ส่วนกุญแจลงนาม session จะถูกสร้างแบบแยกบริบทจาก Client Secret ภายใน Worker และไม่ต้องตั้งค่าเพิ่ม
+
+## Domains
+
+- Frontend (GitHub Pages): `https://sorasukt.github.io/classroom/`
+- API Worker: `https://classroom.sorasukt.com`
+- Auth0 Universal Login: `https://auth.sorasukt.com`
+- Auth0 callback: `https://classroom.sorasukt.com/api/auth/callback`
