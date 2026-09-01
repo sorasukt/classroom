@@ -56,7 +56,7 @@ Worker จะบันทึก D1 ให้สำเร็จก่อน แ�
    npx wrangler deploy
    ```
 
-ตาราง D1 จะถูกสร้างโดยอัตโนมัติเมื่อ Worker รับคำขอครั้งแรก ระบบจะไม่เปิดให้เข้าถึงข้อมูลหากการตั้งค่า Auth0 ยังไม่ครบ
+ตาราง D1 ถูกจัดการด้วยไฟล์ `migrations/0001_initial.sql` และต้อง apply ก่อน Deploy Worker ระบบไม่สร้างหรือแก้ schema ระหว่างคำขอของผู้ใช้
 
 ## Local development
 
@@ -64,11 +64,11 @@ Worker จะบันทึก D1 ให้สำเร็จก่อน แ�
 npx wrangler dev
 ```
 
-การเรียก `/api/bootstrap` จะตรวจสอบความพร้อมของฐานข้อมูล ส่วนตารางทั้งหมดจะถูกสร้างอัตโนมัติจาก Worker
+การเรียก `/api/health` จะตรวจสอบว่า Worker ได้รับ D1 และ R2 binding ครบ ส่วน `/api/bootstrap` ใช้ตรวจสอบการเข้าถึง API หลังเข้าสู่ระบบ
 
 ## GitHub Actions
 
-Workflow `.github/workflows/deploy.yml` จะตรวจ syntax ในทุก Pull Request และ Deploy ไป Cloudflare อัตโนมัติเมื่อ push หรือ merge เข้า `main` รวมถึงรองรับการกด Run workflow เอง
+Workflow `.github/workflows/deploy.yml` จะตรวจ syntax, migration และ Worker bundle ในทุก Pull Request เมื่อ merge เข้า `main` ระบบจะสร้าง production config, ตรวจ D1, สร้าง R2 bucket หากยังไม่มี, apply D1 migrations, dry-run และ Deploy Worker ตามลำดับ รวมถึงรองรับการกด Run workflow เอง
 
 เพิ่มค่าที่ `Settings → Secrets and variables → Actions` ดังนี้
 
