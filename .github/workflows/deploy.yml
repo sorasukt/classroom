@@ -29,6 +29,7 @@ jobs:
       - name: Check migration and Wrangler configuration
         run: |
           test -s migrations/0001_initial.sql
+          test -s migrations/0002_tenant_admin_import.sql
           cp wrangler.toml wrangler.validation.toml
           sed -i "s|REPLACE_WITH_D1_DATABASE_ID|00000000-0000-0000-0000-000000000000|g" wrangler.validation.toml
           sed -i "s|REPLACE_WITH_AUTH0_CLIENT_ID|ci-auth0-client-id|g" wrangler.validation.toml
