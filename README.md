@@ -1,4 +1,4 @@
-# /sorasukt Classroom
+# Classroom by /sorasukt
 
 ระบบเช็คชื่อนักเรียนสำหรับครู โดย Host หน้าเว็บ `index.html` ผ่าน GitHub Pages และใช้ Cloudflare Worker สำหรับ API, Auth0 callback, D1 และ R2 เท่านั้น
 
