@@ -34,11 +34,13 @@ async function handleApi(request, env, ctx, url) {
   const path = url.pathname;
 
   if (path === "/api/health") return json({ ok: true, time: new Date().toISOString() });
-  if (path === "/api/session" && method === "POST") return login(request, env);
-  if (path === "/api/session" && method === "DELETE") return logout();
+  if (path === "/api/auth/login" && method === "GET") return beginAuth(url, env);
+  if (path === "/api/auth/callback" && method === "GET") return finishAuth(request, url, env);
+  if (path === "/api/auth/logout" && method === "GET") return logout(url, env);
 
   const auth = await authorize(request, env);
   if (!auth) return json({ error: "กรุณาเข้าสู่ระบบ" }, 401);
+  if (path === "/api/session" && method === "GET") return json({ user: auth });
 
   if (path === "/api/bootstrap" && method === "GET") return bootstrap(env.DB);
   if (path === "/api/dashboard" && method === "GET") return dashboard(env.DB);
@@ -133,34 +135,138 @@ async function ensureSchema(db) {
   `);
 }
 
-async function login(request, env) {
-  const { password = "" } = await readBody(request);
-  if (!env.APP_PASSWORD) return json({ ok: true, setupRequired: true });
-  if (!timingSafeEqual(password, env.APP_PASSWORD)) return json({ error: "รหัสผ่านไม่ถูกต้อง" }, 401);
-  const expires = Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7;
-  const value = `${expires}.${await sign(String(expires), env.APP_PASSWORD)}`;
-  return new Response(JSON.stringify({ ok: true }), {
+async function beginAuth(url, env) {
+  const config = authConfig(env);
+  if (!config.ok) return json({ error: config.error }, 503);
+  const state = crypto.randomUUID().replaceAll("-", "");
+  const signedState = `${state}.${await sign(state, env.SESSION_SECRET)}`;
+  const callback = `${url.origin}/api/auth/callback`;
+  const target = new URL(`${config.issuer}/authorize`);
+  target.search = new URLSearchParams({
+    response_type: "code",
+    client_id: env.AUTH0_CLIENT_ID,
+    redirect_uri: callback,
+    scope: "openid profile email",
+    state,
+  }).toString();
+  return new Response(null, {
+    status: 302,
     headers: {
-      ...JSON_HEADERS,
-      "set-cookie": `classroom_session=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=604800`,
+      location: target.toString(),
+      "set-cookie": `classroom_auth_state=${signedState}; Path=/api/auth/callback; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
+      "cache-control": "no-store",
     },
   });
 }
 
-function logout() {
-  return new Response(JSON.stringify({ ok: true }), {
-    headers: { ...JSON_HEADERS, "set-cookie": "classroom_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0" },
+async function finishAuth(request, url, env) {
+  const config = authConfig(env);
+  if (!config.ok) return json({ error: config.error }, 503);
+  const code = url.searchParams.get("code") || "";
+  const state = url.searchParams.get("state") || "";
+  const error = url.searchParams.get("error_description") || url.searchParams.get("error");
+  if (error) return authError(error, url.origin);
+  const stateCookie = getCookie(request, "classroom_auth_state");
+  const [savedState, signature] = stateCookie.split(".");
+  if (!code || !state || !savedState || !signature || !timingSafeEqual(state, savedState) || !timingSafeEqual(signature, await sign(savedState, env.SESSION_SECRET))) {
+    return authError("ไม่สามารถยืนยันคำขอเข้าสู่ระบบได้", url.origin);
+  }
+
+  const tokenResponse = await fetch(`${config.issuer}/oauth/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      client_id: env.AUTH0_CLIENT_ID,
+      client_secret: env.AUTH0_CLIENT_SECRET,
+      code,
+      redirect_uri: `${url.origin}/api/auth/callback`,
+    }),
+  });
+  if (!tokenResponse.ok) return authError("Auth0 ไม่สามารถยืนยันตัวตนได้", url.origin);
+  const tokens = await tokenResponse.json();
+  const profileResponse = await fetch(`${config.issuer}/userinfo`, { headers: { authorization: `Bearer ${tokens.access_token}` } });
+  if (!profileResponse.ok) return authError("ไม่สามารถอ่านข้อมูลบัญชี Auth0 ได้", url.origin);
+  const profile = await profileResponse.json();
+  const session = {
+    sub: clean(profile.sub, 180),
+    name: clean(profile.name || profile.nickname || profile.email, 180),
+    email: clean(profile.email, 254),
+    picture: clean(profile.picture, 500),
+    exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7,
+  };
+  const encoded = base64UrlEncode(JSON.stringify(session));
+  const value = `${encoded}.${await sign(encoded, env.SESSION_SECRET)}`;
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: url.origin,
+      "set-cookie": `classroom_session=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`,
+      "cache-control": "no-store",
+    },
+  });
+}
+
+function logout(url, env) {
+  const config = authConfig(env);
+  const target = config.ok
+    ? `${config.issuer}/v2/logout?${new URLSearchParams({ client_id: env.AUTH0_CLIENT_ID, returnTo: url.origin })}`
+    : url.origin;
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: target,
+      "set-cookie": "classroom_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
+      "cache-control": "no-store",
+    },
   });
 }
 
 async function authorize(request, env) {
-  if (!env.APP_PASSWORD) return true;
+  if (!env.SESSION_SECRET) return false;
   const cookie = request.headers.get("cookie") || "";
   const value = cookie.match(/(?:^|;\s*)classroom_session=([^;]+)/)?.[1];
   if (!value) return false;
-  const [expires, signature] = value.split(".");
-  if (!expires || !signature || Number(expires) < Date.now() / 1000) return false;
-  return timingSafeEqual(signature, await sign(expires, env.APP_PASSWORD));
+  const [encoded, signature] = value.split(".");
+  if (!encoded || !signature || !timingSafeEqual(signature, await sign(encoded, env.SESSION_SECRET))) return false;
+  try {
+    const session = JSON.parse(base64UrlDecode(encoded));
+    if (!session.sub || Number(session.exp) < Date.now() / 1000) return false;
+    return session;
+  } catch {
+    return false;
+  }
+}
+
+function authConfig(env) {
+  const domain = String(env.AUTH0_DOMAIN || "").trim().replace(/^https?:\/\//, "").replace(/\/$/, "");
+  if (!domain || !env.AUTH0_CLIENT_ID || !env.AUTH0_CLIENT_SECRET || !env.SESSION_SECRET) {
+    return { ok: false, error: "ยังไม่ได้ตั้งค่า Auth0 สำหรับระบบ" };
+  }
+  return { ok: true, issuer: `https://${domain}` };
+}
+
+function getCookie(request, name) {
+  const cookie = request.headers.get("cookie") || "";
+  return decodeURIComponent(cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`))?.[1] || "");
+}
+
+function authError(message, origin) {
+  const safe = encodeURIComponent(String(message).slice(0, 200));
+  return Response.redirect(`${origin}/?auth_error=${safe}`, 302);
+}
+
+function base64UrlEncode(value) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  bytes.forEach((byte) => binary += String.fromCharCode(byte));
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function base64UrlDecode(value) {
+  const base64 = value.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat((4 - value.length % 4) % 4);
+  const binary = atob(base64);
+  return new TextDecoder().decode(Uint8Array.from(binary, (char) => char.charCodeAt(0)));
 }
 
 async function sign(value, secret) {
@@ -396,7 +502,7 @@ const APP_HTML = String.raw`<!doctype html>
 <div class="shell">
   <aside class="sidebar"><div class="brand"><span class="logo">/</span><span>/sorasukt <b>Classroom</b></span></div><nav class="nav" id="desktopNav"></nav></aside>
   <main class="content">
-    <section class="page active" data-page="dashboard"><header class="topbar"><div><p class="eyebrow" id="todayLabel">วันนี้</p><h1 class="title">ภาพรวมชั้นเรียน</h1><p class="subtitle">สิ่งสำคัญสำหรับการสอนของคุณในวันนี้</p></div><div class="actions"><button class="button secondary" onclick="openModal('classroomModal')">+ ห้องเรียน</button><button class="button" onclick="goAttendance()">เช็คชื่อวันนี้</button></div></header><div class="grid metrics" id="metrics"></div><section class="panel"><div class="panel-head"><h2>คาบเรียนวันนี้</h2><span class="muted" id="todayCount"></span></div><div class="today-list" id="todayClasses"></div></section><section class="panel"><div class="panel-head"><h2>ห้องเรียน</h2><button class="button secondary" onclick="navigate('classrooms')">ดูทั้งหมด</button></div><div class="grid class-grid" id="dashboardClasses"></div></section></section>
+    <section class="page active" data-page="dashboard"><header class="topbar"><div><p class="eyebrow" id="todayLabel">วันนี้</p><h1 class="title">ภาพรวมชั้นเรียน</h1><p class="subtitle">สิ่งสำคัญสำหรับการสอนของคุณในวันนี้</p></div><div class="actions"><button class="button secondary" onclick="openModal('classroomModal')">+ ห้องเรียน</button><button class="button" onclick="goAttendance()">เช็คชื่อวันนี้</button><button class="button secondary" onclick="logout()">ออกจากระบบ</button></div></header><div class="grid metrics" id="metrics"></div><section class="panel"><div class="panel-head"><h2>คาบเรียนวันนี้</h2><span class="muted" id="todayCount"></span></div><div class="today-list" id="todayClasses"></div></section><section class="panel"><div class="panel-head"><h2>ห้องเรียน</h2><button class="button secondary" onclick="navigate('classrooms')">ดูทั้งหมด</button></div><div class="grid class-grid" id="dashboardClasses"></div></section></section>
     <section class="page" data-page="classrooms"><header class="topbar"><div><p class="eyebrow">จัดการข้อมูล</p><h1 class="title">ห้องเรียนและนักเรียน</h1><p class="subtitle">เพิ่มรายชื่อ ดูสถิติ และเปิดประวัติรายบุคคล</p></div><button class="button" onclick="openModal('classroomModal')">+ สร้างห้องเรียน</button></header><div class="grid class-grid" id="allClasses"></div><section class="panel" id="studentPanel" style="margin-top:20px;display:none"><div class="panel-head"><div><h2 id="studentPanelTitle">รายชื่อนักเรียน</h2><span class="muted" id="studentCount"></span></div><button class="button" onclick="openStudentModal()">+ นักเรียน</button></div><div class="table-wrap"><table class="table"><thead><tr><th>เลขที่</th><th>ชื่อ-นามสกุล</th><th>มา</th><th>สาย</th><th>ขาด</th><th>ลา</th><th>เข้าเรียน</th><th></th></tr></thead><tbody id="studentRows"></tbody></table></div></section></section>
     <section class="page" data-page="attendance"><header class="topbar"><div><p class="eyebrow">บันทึกประจำวัน</p><h1 class="title">เช็คชื่อ</h1><p class="subtitle">แตะสถานะเพื่อบันทึก มา สาย ขาด หรือลา</p></div><div class="actions"><button class="button secondary" onclick="shareDaily()">แชร์ LINE</button><button class="button danger" onclick="saveAttendance()">บันทึกการเช็คชื่อ</button></div></header><div class="toolbar"><div class="field"><label>ห้องเรียน</label><select class="input select-wide" id="attendanceClass" onchange="loadAttendance()"></select></div><div class="field"><label>วันที่</label><input class="input" type="date" id="attendanceDate" onchange="loadAttendance()"></div><div class="field"><label>&nbsp;</label><button class="button secondary" onclick="markAllPresent()">ทำเครื่องหมาย “มา” ทั้งหมด</button></div></div><section class="panel"><div class="panel-head"><h2 id="attendanceTitle">รายชื่อ</h2><span class="muted" id="attendanceSummary"></span></div><div class="table-wrap"><table class="table"><thead><tr><th>เลขที่</th><th>ชื่อ-นามสกุล</th><th>สถานะ</th></tr></thead><tbody id="attendanceRows"></tbody></table></div></section></section>
     <section class="page" data-page="lessons"><header class="topbar"><div><p class="eyebrow">เตรียมการสอน</p><h1 class="title">แผนการสอน</h1><p class="subtitle">บันทึกหัวข้อ จุดประสงค์ สื่อ และหมายเหตุของแต่ละคาบ</p></div><button class="button" onclick="openLessonModal()">+ เพิ่มแผนการสอน</button></header><div class="toolbar"><div class="field"><label>ห้องเรียน</label><select class="input select-wide" id="lessonClass" onchange="loadLessons()"></select></div></div><div class="lesson-list" id="lessonList"></div></section>
@@ -408,7 +514,7 @@ const APP_HTML = String.raw`<!doctype html>
 <div class="modal" id="studentModal"><form class="modal-card" onsubmit="createStudent(event)"><div class="modal-head"><h2>เพิ่มนักเรียน</h2><button type="button" class="close" onclick="closeModal('studentModal')">×</button></div><div class="form-grid"><div class="field"><label>เลขที่</label><input class="input" name="student_no" inputmode="numeric"></div><div class="field"><label>ชื่อ-นามสกุล</label><input class="input" name="name" required></div><div class="field full"><label>หมายเหตุ (ถ้ามี)</label><input class="input" name="note"></div><button class="button full">เพิ่มรายชื่อ</button></div></form></div>
 <div class="modal" id="historyModal"><div class="modal-card"><div class="modal-head"><div><h2 id="historyName">ประวัติรายบุคคล</h2><span class="muted" id="historyClass"></span></div><button class="close" onclick="closeModal('historyModal')">×</button></div><div class="grid stats-mini" id="historyStats"></div><div class="history-list" id="historyList"></div></div></div>
 <div class="modal" id="lessonModal"><form class="modal-card" onsubmit="saveLesson(event)"><div class="modal-head"><h2 id="lessonModalTitle">เพิ่มแผนการสอน</h2><button type="button" class="close" onclick="closeModal('lessonModal')">×</button></div><input type="hidden" name="id"><div class="form-grid"><div class="field"><label>วันที่สอน</label><input class="input" type="date" name="lesson_date" required></div><div class="field"><label>หัวข้อบทเรียน</label><input class="input" name="topic" placeholder="เช่น Giving Directions" required></div><div class="field full"><label>จุดประสงค์การเรียนรู้</label><textarea class="input" name="objectives" rows="3" placeholder="นักเรียนสามารถ..."></textarea></div><div class="field full"><label>สื่อ/อุปกรณ์</label><textarea class="input" name="materials" rows="2" placeholder="สไลด์ ใบงาน วิดีโอ..."></textarea></div><div class="field full"><label>หมายเหตุ</label><textarea class="input" name="notes" rows="2"></textarea></div><button class="button full">บันทึกแผนการสอน</button></div></form></div>
-<div class="login" id="login"><form class="login-card" onsubmit="login(event)"><span class="tile">/</span><h1>/sorasukt Classroom</h1><p class="muted">กรอกรหัสผ่านเพื่อดูข้อมูลชั้นเรียน</p><input class="input" type="password" name="password" autocomplete="current-password" required><button class="button">เข้าสู่ระบบ</button><p class="muted" id="loginError"></p></form></div>
+<div class="login" id="login"><div class="login-card"><span class="tile">/</span><h1>/sorasukt Classroom</h1><p class="muted">เข้าสู่ระบบอย่างปลอดภัยด้วยบัญชี Auth0 ของคุณ</p><button class="button" style="width:100%;margin-top:20px" onclick="beginLogin()">เข้าสู่ระบบด้วย Auth0</button><p class="muted" id="loginError"></p></div></div>
 <div class="toast" id="toast"></div>
 <script>
 const state={classrooms:[],selectedClass:0,students:[],attendance:[],lessons:[]};
@@ -419,9 +525,10 @@ document.getElementById('mobileNav').innerHTML=navItems.map(([id,icon,label])=>'
 document.getElementById('dayPicker').innerHTML=['อา','จ','อ','พ','พฤ','ศ','ส'].map((d,i)=>'<button type="button" class="day" data-day="'+i+'" onclick="this.classList.toggle(\'selected\')">'+d+'</button>').join('');
 document.getElementById('attendanceDate').value=localDate();document.getElementById('reportTo').value=localDate();const f=new Date();f.setDate(f.getDate()-30);document.getElementById('reportFrom').value=f.toLocaleDateString('en-CA');
 
-async function api(path,options={}){const response=await fetch(path,{...options,headers:{'content-type':'application/json',...(options.headers||{})}});const data=await response.json();if(response.status===401&&path!=='/api/session'){document.getElementById('login').classList.add('open');throw new Error('กรุณาเข้าสู่ระบบ')}if(!response.ok)throw new Error(data.error||'เกิดข้อผิดพลาด');return data}
-async function init(){try{await api('/api/bootstrap');await Promise.all([loadDashboard(),loadClassrooms()]);navigate('dashboard')}catch(e){if(!String(e.message).includes('เข้าสู่ระบบ'))toast(e.message)}}
-async function login(e){e.preventDefault();const password=new FormData(e.target).get('password');try{await api('/api/session',{method:'POST',body:JSON.stringify({password})});document.getElementById('login').classList.remove('open');e.target.reset();init()}catch(err){document.getElementById('loginError').textContent=err.message}}
+async function api(path,options={}){const response=await fetch(path,{...options,headers:{'content-type':'application/json',...(options.headers||{})}});const data=await response.json();if(response.status===401){document.getElementById('login').classList.add('open');throw new Error('กรุณาเข้าสู่ระบบ')}if(!response.ok)throw new Error(data.error||'เกิดข้อผิดพลาด');return data}
+async function init(){const authError=new URLSearchParams(location.search).get('auth_error');if(authError){document.getElementById('loginError').textContent=authError;history.replaceState({},'',location.pathname)}try{await api('/api/session');await api('/api/bootstrap');await Promise.all([loadDashboard(),loadClassrooms()]);document.getElementById('login').classList.remove('open');navigate('dashboard')}catch(e){if(!String(e.message).includes('เข้าสู่ระบบ')){document.getElementById('login').classList.add('open');document.getElementById('loginError').textContent=e.message}}}
+function beginLogin(){location.href='/api/auth/login'}
+function logout(){location.href='/api/auth/logout'}
 function navigate(page){document.querySelectorAll('.page').forEach(x=>x.classList.toggle('active',x.dataset.page===page));document.querySelectorAll('[data-nav]').forEach(x=>x.classList.toggle('active',x.dataset.nav===page));if(page==='attendance'&&!state.attendance.length)loadAttendance();if(page==='lessons')loadLessons();window.scrollTo({top:0})}
 async function loadDashboard(){const d=await api('/api/dashboard');document.getElementById('todayLabel').textContent=new Intl.DateTimeFormat('th-TH',{dateStyle:'full'}).format(new Date(d.date+'T12:00:00+07:00'));document.getElementById('metrics').innerHTML=metric('ห้องเรียนทั้งหมด',d.classrooms,'ห้อง')+metric('นักเรียนทั้งหมด',d.students,'คน')+metric('อัตราเข้าเรียน 14 วัน',d.attendanceRate,'%')+metric('แผนการสอน',d.lessons,'แผน');document.getElementById('todayCount').textContent=d.todayClasses.length+' คาบ';document.getElementById('todayClasses').innerHTML=d.todayClasses.length?d.todayClasses.map(c=>'<div class="today-row"><span class="time">'+esc(c.start_time||'—')+'</span><span class="tile">'+esc(tileLetter(c.name))+'<sup>'+c.student_count+'</sup></span><div class="grow"><b>'+esc(c.name)+'</b><span class="muted">'+esc(c.room||'ไม่ระบุห้อง')+'</span></div><button class="button secondary" onclick="openAttendance('+c.id+')">เช็คชื่อ</button></div>').join(''):'<div class="empty">วันนี้ยังไม่มีคาบเรียนในตาราง</div>'}
 function metric(label,value,unit){return '<article class="metric"><small>'+label+'</small><strong>'+value+' <span class="unit">'+unit+'</span></strong></article>'}
