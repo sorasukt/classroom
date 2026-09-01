@@ -68,7 +68,7 @@ npx wrangler dev
 
 ## GitHub Actions
 
-Workflow `.github/workflows/deploy.yml` จะตรวจ syntax, migration และ Worker bundle ในทุก Pull Request เมื่อ merge เข้า `main` ระบบจะสร้าง production config, ตรวจ D1, สร้าง R2 bucket หากยังไม่มี, apply D1 migrations, dry-run และ Deploy Worker ตามลำดับ รวมถึงรองรับการกด Run workflow เอง
+Workflow `.github/workflows/deploy.yml` จะตรวจ syntax, migration และ Worker bundle ในทุก Pull Request เมื่อ merge เข้า `main` ระบบจะใส่ค่าจริงลงใน Wrangler config ชั่วคราวบน GitHub runner, ตรวจ D1, สร้าง R2 bucket หากยังไม่มี, apply D1 migrations, dry-run และ Deploy Worker ตามลำดับ รวมถึงรองรับการกด Run workflow เอง
 
 เพิ่มค่าที่ `Settings → Secrets and variables → Actions` ดังนี้
 
