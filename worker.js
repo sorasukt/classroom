@@ -180,7 +180,7 @@ function authConfig(env) {
 }
 
 function frontendUrl(env) {
-  return String(env.FRONTEND_URL || "https://sorasukt.github.io/classroom/").replace(/\/?$/, "/");
+  return String(env.FRONTEND_URL || "https://sorasukt.com/classroom/").replace(/\/?$/, "/");
 }
 
 async function sessionSigningSecret(env) {
@@ -202,6 +202,8 @@ function authError(message, env) {
 function allowedOrigin(request, env) {
   const origin = request.headers.get("origin") || "";
   const allowed = new Set([
+    "https://sorasukt.com",
+    "https://www.sorasukt.com",
     "https://sorasukt.github.io",
     "https://classroom.sorasukt.com",
     ...String(env.CORS_ORIGINS || "").split(",").map((item) => item.trim()).filter(Boolean),

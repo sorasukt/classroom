@@ -39,8 +39,8 @@ Worker จะบันทึก D1 ให้สำเร็จก่อน แ�
 3. สร้าง Auth0 Application ประเภท **Regular Web Application** แล้วตั้งค่า:
 
    - Allowed Callback URLs: `https://classroom.sorasukt.com/api/auth/callback`
-   - Allowed Logout URLs: `https://sorasukt.github.io/classroom/`
-   - Allowed Web Origins: `https://sorasukt.github.io`
+   - Allowed Logout URLs: `https://sorasukt.com/classroom/`, `https://sorasukt.github.io/classroom/`
+   - Allowed Web Origins: `https://sorasukt.com`, `https://www.sorasukt.com`, `https://sorasukt.github.io`
 
    จากนั้นแก้ `AUTH0_DOMAIN` และ `AUTH0_CLIENT_ID` ใน `wrangler.toml`
 
@@ -87,7 +87,8 @@ Workflow จะส่ง `AUTH0_CLIENT_SECRET` ไปเก็บเป็น Cl
 
 ## Domains
 
-- Frontend (GitHub Pages): `https://sorasukt.github.io/classroom/`
+- Frontend (GitHub Pages + custom domain): `https://sorasukt.com/classroom/`
+- GitHub Pages fallback: `https://sorasukt.github.io/classroom/`
 - API Worker: `https://classroom.sorasukt.com`
 - Auth0 Universal Login: `https://auth.sorasukt.com`
 - Auth0 callback: `https://classroom.sorasukt.com/api/auth/callback`
