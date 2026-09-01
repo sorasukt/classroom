@@ -13,6 +13,7 @@
 - สร้างลิงก์สรุปรายวันและแชร์ผ่าน LINE
 - Responsive พร้อม bottom navigation บนมือถือ
 - D1 สำหรับข้อมูล และ R2 สำหรับเก็บสำเนาไฟล์ CSV ที่ส่งออก
+- Auth0 Universal Login พร้อม session แบบ HttpOnly
 
 ## ติดตั้ง
 
@@ -25,19 +26,30 @@
 
 2. นำ `database_id` ที่ได้รับมาแทนค่า `REPLACE_WITH_D1_DATABASE_ID` ใน `wrangler.toml`
 
-3. ตั้งรหัสผ่านสำหรับระบบ (แนะนำให้ใช้รหัสยาวและไม่ซ้ำบริการอื่น)
+3. สร้าง Auth0 Application ประเภท **Regular Web Application** แล้วตั้งค่า:
+
+   - Allowed Callback URLs: `https://YOUR_DOMAIN/api/auth/callback`
+   - Allowed Logout URLs: `https://YOUR_DOMAIN`
+   - Allowed Web Origins: `https://YOUR_DOMAIN`
+
+   จากนั้นแก้ `AUTH0_DOMAIN` และ `AUTH0_CLIENT_ID` ใน `wrangler.toml`
+
+4. ตั้ง Auth0 Client Secret และ Session Secret เป็น Worker secrets
 
    ```bash
-   npx wrangler secret put APP_PASSWORD
+   npx wrangler secret put AUTH0_CLIENT_SECRET
+   npx wrangler secret put SESSION_SECRET
    ```
 
-4. Deploy
+   `SESSION_SECRET` ควรเป็นค่าสุ่มที่ยาวอย่างน้อย 32 ไบต์
+
+5. Deploy
 
    ```bash
    npx wrangler deploy
    ```
 
-ตาราง D1 จะถูกสร้างโดยอัตโนมัติเมื่อ Worker รับคำขอครั้งแรก หากยังไม่ตั้ง `APP_PASSWORD` ระบบจะเปิดใช้งานโดยไม่ถามรหัสผ่านเพื่อให้ทดสอบใน local ได้ จึงควรตั้ง secret ก่อนเปิดใช้งานจริง
+ตาราง D1 จะถูกสร้างโดยอัตโนมัติเมื่อ Worker รับคำขอครั้งแรก ระบบจะไม่เปิดให้เข้าถึงข้อมูลหากการตั้งค่า Auth0 หรือ `SESSION_SECRET` ยังไม่ครบ
 
 ## Local development
 
