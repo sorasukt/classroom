@@ -12,7 +12,7 @@ export default {
       if (url.pathname.startsWith("/share/")) {
         return await renderSharedSummary(env, url.pathname.split("/").pop());
       }
-      return json({ error: "Classroom API", health: `${url.origin}/api/health` }, 404);
+      return json({ error: "Classroom by /sorasukt API", health: `${url.origin}/api/health` }, 404);
     } catch (error) {
       console.error(JSON.stringify({ message: "Classroom Worker failed", path: url.pathname, error: error?.message || error?.name || "unknown" }));
       const response = json({ error: "ระบบไม่สามารถดำเนินการได้ในขณะนี้", code: "WORKER_ERROR" }, 500);
