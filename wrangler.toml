@@ -13,4 +13,5 @@ bucket_name = "classroom-exports"
 
 [vars]
 APP_NAME = "Classroom"
-
+AUTH0_DOMAIN = "auth.sorasukt.com"
+AUTH0_CLIENT_ID = "REPLACE_WITH_AUTH0_CLIENT_ID"
