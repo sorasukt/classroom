@@ -82,22 +82,22 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx wrangler@4.81.0 deploy --dry-run --config wrangler.toml
 
-      - name: Upload secrets and deploy
-        id: deploy
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: "4.81.0"
-          command: deploy
-          secrets: |
-            AUTH0_CLIENT_SECRET
+      - name: Upload Auth0 Worker secret
         env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
+        run: |
+          test -n "$AUTH0_CLIENT_SECRET"
+          printf '%s' "$AUTH0_CLIENT_SECRET" | npx wrangler@4.81.0 secret put AUTH0_CLIENT_SECRET --config wrangler.toml
+
+      - name: Deploy Worker to Cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler@4.81.0 deploy --config wrangler.toml
 
       - name: Add deployment summary
-        env:
-          DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment-url }}
         run: |
           echo "## Cloudflare deployment" >> "$GITHUB_STEP_SUMMARY"
-          echo "Deployment completed: $DEPLOYMENT_URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "Deployment completed: https://classroom.sorasukt.com" >> "$GITHUB_STEP_SUMMARY"
