@@ -1,0 +1,16 @@
+name = "classroom"
+main = "worker.js"
+compatibility_date = "2026-08-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "classroom-db"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[[r2_buckets]]
+binding = "EXPORTS"
+bucket_name = "classroom-exports"
+
+[vars]
+APP_NAME = "Classroom"
+
