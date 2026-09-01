@@ -139,7 +139,7 @@ async function beginAuth(url, env) {
   const config = authConfig(env);
   if (!config.ok) return json({ error: config.error }, 503);
   const state = crypto.randomUUID().replaceAll("-", "");
-  const signedState = `${state}.${await sign(state, env.SESSION_SECRET)}`;
+  const signedState = `${state}.${await sign(state, await sessionSigningSecret(env))}`;
   const callback = `${url.origin}/api/auth/callback`;
   const target = new URL(`${config.issuer}/authorize`);
   target.search = new URLSearchParams({
@@ -168,7 +168,7 @@ async function finishAuth(request, url, env) {
   if (error) return authError(error, url.origin);
   const stateCookie = getCookie(request, "classroom_auth_state");
   const [savedState, signature] = stateCookie.split(".");
-  if (!code || !state || !savedState || !signature || !timingSafeEqual(state, savedState) || !timingSafeEqual(signature, await sign(savedState, env.SESSION_SECRET))) {
+  if (!code || !state || !savedState || !signature || !timingSafeEqual(state, savedState) || !timingSafeEqual(signature, await sign(savedState, await sessionSigningSecret(env)))) {
     return authError("ไม่สามารถยืนยันคำขอเข้าสู่ระบบได้", url.origin);
   }
 
@@ -196,7 +196,7 @@ async function finishAuth(request, url, env) {
     exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7,
   };
   const encoded = base64UrlEncode(JSON.stringify(session));
-  const value = `${encoded}.${await sign(encoded, env.SESSION_SECRET)}`;
+  const value = `${encoded}.${await sign(encoded, await sessionSigningSecret(env))}`;
   return new Response(null, {
     status: 302,
     headers: {
@@ -223,12 +223,12 @@ function logout(url, env) {
 }
 
 async function authorize(request, env) {
-  if (!env.SESSION_SECRET) return false;
+  if (!env.AUTH0_CLIENT_SECRET) return false;
   const cookie = request.headers.get("cookie") || "";
   const value = cookie.match(/(?:^|;\s*)classroom_session=([^;]+)/)?.[1];
   if (!value) return false;
   const [encoded, signature] = value.split(".");
-  if (!encoded || !signature || !timingSafeEqual(signature, await sign(encoded, env.SESSION_SECRET))) return false;
+  if (!encoded || !signature || !timingSafeEqual(signature, await sign(encoded, await sessionSigningSecret(env)))) return false;
   try {
     const session = JSON.parse(base64UrlDecode(encoded));
     if (!session.sub || Number(session.exp) < Date.now() / 1000) return false;
@@ -240,10 +240,16 @@ async function authorize(request, env) {
 
 function authConfig(env) {
   const domain = String(env.AUTH0_DOMAIN || "").trim().replace(/^https?:\/\//, "").replace(/\/$/, "");
-  if (!domain || !env.AUTH0_CLIENT_ID || !env.AUTH0_CLIENT_SECRET || !env.SESSION_SECRET) {
+  if (!domain || !env.AUTH0_CLIENT_ID || !env.AUTH0_CLIENT_SECRET) {
     return { ok: false, error: "ยังไม่ได้ตั้งค่า Auth0 สำหรับระบบ" };
   }
   return { ok: true, issuer: `https://${domain}` };
+}
+
+async function sessionSigningSecret(env) {
+  const material = new TextEncoder().encode(`sorasukt-classroom-session-v1\0${env.AUTH0_CLIENT_SECRET}`);
+  const digest = await crypto.subtle.digest("SHA-256", material);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function getCookie(request, name) {
