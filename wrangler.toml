@@ -10,6 +10,7 @@ custom_domain = true
 binding = "DB"
 database_name = "classroom-db"
 database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
 
 [[r2_buckets]]
 binding = "EXPORTS"
@@ -22,3 +23,7 @@ AUTH0_CLIENT_ID = "REPLACE_WITH_AUTH0_CLIENT_ID"
 PUBLIC_URL = "https://classroom.sorasukt.com"
 FRONTEND_URL = "https://sorasukt.github.io/classroom/"
 CORS_ORIGINS = "https://sorasukt.github.io"
+
+[observability]
+enabled = true
+head_sampling_rate = 1
