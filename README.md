@@ -28,9 +28,9 @@
 
 3. สร้าง Auth0 Application ประเภท **Regular Web Application** แล้วตั้งค่า:
 
-   - Allowed Callback URLs: `https://YOUR_DOMAIN/api/auth/callback`
-   - Allowed Logout URLs: `https://YOUR_DOMAIN`
-   - Allowed Web Origins: `https://YOUR_DOMAIN`
+   - Allowed Callback URLs: `https://classroom.sorasukt.com/api/auth/callback`
+   - Allowed Logout URLs: `https://classroom.sorasukt.com`
+   - Allowed Web Origins: `https://classroom.sorasukt.com`
 
    จากนั้นแก้ `AUTH0_DOMAIN` และ `AUTH0_CLIENT_ID` ใน `wrangler.toml`
 
@@ -74,3 +74,9 @@ Workflow `.github/workflows/deploy.yml` จะตรวจ syntax ในทุ�
 - `AUTH0_CLIENT_ID`
 
 Workflow จะส่ง `AUTH0_CLIENT_SECRET` ไปเก็บเป็น Cloudflare Worker Secret ก่อน Deploy โดยอัตโนมัติ ส่วนกุญแจลงนาม session จะถูกสร้างแบบแยกบริบทจาก Client Secret ภายใน Worker และไม่ต้องตั้งค่าเพิ่ม
+
+## Domains
+
+- Application และ API Worker: `https://classroom.sorasukt.com`
+- Auth0 Universal Login: `https://auth.sorasukt.com`
+- Auth0 callback: `https://classroom.sorasukt.com/api/auth/callback`
