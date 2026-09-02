@@ -65,6 +65,7 @@ async function handleApi(request, env, ctx, url) {
     return deleteLesson(env, ctx, Number(path.split("/").pop()), auth);
   }
   if (path === "/api/share" && method === "POST") return createShare(request, env, ctx, url.origin, auth);
+  if (path === "/api/reports/summary" && method === "GET") return reportSummary(env.DB, url, auth);
   if (path === "/api/export.csv" && method === "GET") return exportCsv(env, ctx, url, auth);
   if (path === "/api/branding" && method === "GET") return brandingContext(env.DB, auth);
   if (path === "/api/branding/logo" && method === "GET") return brandingLogo(env, url, auth);
@@ -456,6 +457,33 @@ async function getAttendance(db, url, auth) {
   return json({ classroom, date, students: students.results });
 }
 
+async function reportSummary(db, url, auth) {
+  const classroomId = positiveInt(url.searchParams.get("classroom_id"));
+  const to = validDate(url.searchParams.get("to")) || bangkokDate();
+  const from = validDate(url.searchParams.get("from")) || shiftDate(to, -29);
+  if (!classroomId) return json({ error: "classroom_id ไม่ถูกต้อง" }, 400);
+  if (from > to) return json({ error: "ช่วงวันที่ไม่ถูกต้อง" }, 400);
+  const rangeDays = Math.round((Date.parse(`${to}T12:00:00Z`) - Date.parse(`${from}T12:00:00Z`)) / 86400000) + 1;
+  if (rangeDays > 366) return json({ error: "ดูรายงานได้ครั้งละไม่เกิน 366 วัน" }, 400);
+  const classroom = await db.prepare("SELECT id,name FROM classrooms WHERE id=? AND tenant_key=?").bind(classroomId, auth.tenantKey).first();
+  if (!classroom) return json({ error: "ไม่พบห้องเรียน" }, 404);
+  const daily = await db.prepare(`SELECT ss.session_date date,
+      SUM(a.status='present') present, SUM(a.status='late') late,
+      SUM(a.status='absent') absent, SUM(a.status='leave') leave,
+      COUNT(a.id) total,
+      ROUND(100.0 * SUM(a.status IN ('present','late')) / NULLIF(COUNT(a.id),0),1) rate
+    FROM attendance_sessions ss LEFT JOIN attendance a ON a.session_id=ss.id
+    WHERE ss.classroom_id=? AND ss.session_date BETWEEN ? AND ?
+    GROUP BY ss.id,ss.session_date ORDER BY ss.session_date`).bind(classroomId, from, to).all();
+  const totals = daily.results.reduce((sum, row) => {
+    for (const key of ["present", "late", "absent", "leave", "total"]) sum[key] += Number(row[key]) || 0;
+    return sum;
+  }, { present: 0, late: 0, absent: 0, leave: 0, total: 0 });
+  totals.attended = totals.present + totals.late;
+  totals.rate = totals.total ? Math.round(totals.attended * 1000 / totals.total) / 10 : 0;
+  return json({ classroom, from, to, sessions: daily.results.length, totals, daily: daily.results });
+}
+
 async function saveAttendance(request, env, ctx, auth) {
   const body = await readBody(request);
   const classroomId = positiveInt(body.classroom_id);
@@ -820,6 +848,7 @@ function positiveInt(value) { const n = Number(value); return Number.isInteger(n
 function normalizeDays(value) { return String(value ?? "").split(",").map(Number).filter((n) => n >= 0 && n <= 6).filter((n, i, a) => a.indexOf(n) === i).join(","); }
 function validDate(value) { return /^\d{4}-\d{2}-\d{2}$/.test(String(value || "")) ? String(value) : ""; }
 function bangkokDate() { return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Bangkok", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()); }
+function shiftDate(value, days) { const date = new Date(`${value}T12:00:00Z`); date.setUTCDate(date.getUTCDate() + days); return date.toISOString().slice(0, 10); }
 function formatThaiDate(value) { return new Intl.DateTimeFormat("th-TH", { dateStyle: "long", timeZone: "Asia/Bangkok" }).format(new Date(`${value}T12:00:00+07:00`)); }
 function escapeHtml(value) { return String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[c])); }
 async function readBody(request) { try { return await request.json(); } catch { return {}; } }
