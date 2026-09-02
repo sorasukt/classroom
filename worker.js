@@ -66,8 +66,12 @@ async function handleApi(request, env, ctx, url) {
   }
   if (path === "/api/share" && method === "POST") return createShare(request, env, ctx, url.origin, auth);
   if (path === "/api/export.csv" && method === "GET") return exportCsv(env, ctx, url, auth);
+  if (path === "/api/branding" && method === "GET") return brandingContext(env.DB, auth);
+  if (path === "/api/branding/logo" && method === "GET") return brandingLogo(env, url, auth);
   if (path === "/api/admin" && method === "GET") return adminContext(env.DB, auth);
   if (path === "/api/admin/settings" && method === "POST") return saveAdminSettings(request, env, ctx, auth);
+  if (path === "/api/admin/logo" && method === "POST") return uploadSchoolLogo(request, env, ctx, auth);
+  if (path === "/api/admin/logo" && method === "DELETE") return deleteSchoolLogo(env, ctx, url, auth);
   if (path === "/api/admin/student-template.csv" && method === "GET") return studentTemplate(auth);
   if (path === "/api/admin/import/students" && method === "POST") return importStudents(request, env, ctx, auth);
   if (path === "/api/admin/members" && method === "GET") return listSchoolMembers(env.DB, auth);
@@ -572,9 +576,85 @@ async function exportCsv(env, ctx, url, auth) {
   return new Response(csv, { headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="${filename}"`, "cache-control": "no-store" } });
 }
 
+async function brandingContext(db, auth) {
+  if (!auth.schoolDomain || !auth.schoolVerified || !auth.schoolAccess) {
+    return json({ custom: false, organization_name: "", academic_year: "", term: "", logos: { horizontal: false, square: false } });
+  }
+  const settings = await db.prepare(`SELECT organization_name,academic_year,term,logo_horizontal_key,logo_square_key
+    FROM tenant_settings WHERE tenant_key=?`).bind(auth.tenantKey).first();
+  const custom = Boolean(settings?.organization_name);
+  return json({
+    custom,
+    organization_name: settings?.organization_name || "",
+    academic_year: settings?.academic_year || "",
+    term: settings?.term || "",
+    logos: {
+      horizontal: custom && Boolean(settings?.logo_horizontal_key),
+      square: custom && Boolean(settings?.logo_square_key),
+    },
+  });
+}
+
+async function brandingLogo(env, url, auth) {
+  if (!auth.schoolDomain || !auth.schoolVerified || !auth.schoolAccess || !env.EXPORTS) return json({ error: "ไม่พบโลโก้" }, 404);
+  const kind = url.searchParams.get("kind") === "square" ? "square" : "horizontal";
+  const column = kind === "square" ? "logo_square_key" : "logo_horizontal_key";
+  const settings = await env.DB.prepare(`SELECT organization_name,${column} logo_key FROM tenant_settings WHERE tenant_key=?`).bind(auth.tenantKey).first();
+  if (!settings?.organization_name || !settings?.logo_key) return json({ error: "ไม่พบโลโก้" }, 404);
+  const object = await env.EXPORTS.get(settings.logo_key);
+  if (!object) return json({ error: "ไม่พบโลโก้" }, 404);
+  const headers = new Headers({
+    "content-type": object.httpMetadata?.contentType || "application/octet-stream",
+    "cache-control": "private, max-age=300",
+    "x-content-type-options": "nosniff",
+  });
+  if (object.httpEtag) headers.set("etag", object.httpEtag);
+  return new Response(object.body, { headers });
+}
+
+async function uploadSchoolLogo(request, env, ctx, auth) {
+  const denied = requireSchoolAdmin(auth);
+  if (denied) return denied;
+  if (!env.EXPORTS) return json({ error: "ยังไม่ได้เชื่อมต่อพื้นที่เก็บไฟล์" }, 503);
+  const settings = await env.DB.prepare("SELECT organization_name,logo_horizontal_key,logo_square_key FROM tenant_settings WHERE tenant_key=?").bind(auth.tenantKey).first();
+  if (!settings?.organization_name) return json({ error: "กรุณาบันทึกข้อมูลสถานศึกษาก่อนอัปโหลดโลโก้" }, 400);
+  const body = await readBody(request);
+  const kind = body.kind === "square" ? "square" : body.kind === "horizontal" ? "horizontal" : "";
+  const declaredMime = clean(body.mime, 80).toLowerCase();
+  if (!kind) return json({ error: "ประเภทโลโก้ไม่ถูกต้อง" }, 400);
+  let bytes;
+  try { bytes = base64ToBytes(String(body.data || "")); } catch { return json({ error: "ไฟล์โลโก้ไม่ถูกต้อง" }, 400); }
+  if (!bytes.length || bytes.length > 2 * 1024 * 1024) return json({ error: "โลโก้ต้องมีขนาดไม่เกิน 2 MB" }, 400);
+  const mime = detectImageMime(bytes);
+  if (!mime || mime !== declaredMime) return json({ error: "รองรับเฉพาะ PNG, JPEG และ WebP" }, 400);
+  const extension = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" }[mime];
+  const tenantHash = (await sha256Hex(auth.tenantKey)).slice(0, 24);
+  const key = `branding/${tenantHash}/${kind}-${Date.now()}.${extension}`;
+  await env.EXPORTS.put(key, bytes, { httpMetadata: { contentType: mime }, customMetadata: { tenant: tenantHash, kind } });
+  const column = kind === "square" ? "logo_square_key" : "logo_horizontal_key";
+  const oldKey = kind === "square" ? settings.logo_square_key : settings.logo_horizontal_key;
+  await env.DB.prepare(`UPDATE tenant_settings SET ${column}=?,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE tenant_key=?`).bind(key, auth.sub, auth.tenantKey).run();
+  if (oldKey && oldKey !== key) queueR2(ctx, env.EXPORTS.delete(oldKey), oldKey);
+  archiveMutation(env, ctx, "school.logo.uploaded", { tenant_key: auth.tenantKey, kind, key, mime, bytes: bytes.length, updated_by: auth.sub });
+  return json({ ok: true, kind });
+}
+
+async function deleteSchoolLogo(env, ctx, url, auth) {
+  const denied = requireSchoolAdmin(auth);
+  if (denied) return denied;
+  const kind = url.searchParams.get("kind") === "square" ? "square" : url.searchParams.get("kind") === "horizontal" ? "horizontal" : "";
+  if (!kind) return json({ error: "ประเภทโลโก้ไม่ถูกต้อง" }, 400);
+  const column = kind === "square" ? "logo_square_key" : "logo_horizontal_key";
+  const settings = await env.DB.prepare(`SELECT ${column} logo_key FROM tenant_settings WHERE tenant_key=?`).bind(auth.tenantKey).first();
+  await env.DB.prepare(`UPDATE tenant_settings SET ${column}='',updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE tenant_key=?`).bind(auth.sub, auth.tenantKey).run();
+  if (settings?.logo_key && env.EXPORTS) queueR2(ctx, env.EXPORTS.delete(settings.logo_key), settings.logo_key);
+  archiveMutation(env, ctx, "school.logo.deleted", { tenant_key: auth.tenantKey, kind, deleted_by: auth.sub });
+  return json({ ok: true });
+}
+
 async function adminContext(db, auth) {
   if (!auth.canManageRoster) return requireRosterAdmin(auth);
-  const settings = await db.prepare("SELECT organization_name,academic_year,term,updated_at FROM tenant_settings WHERE tenant_key=?").bind(auth.tenantKey).first();
+  const settings = await db.prepare("SELECT organization_name,academic_year,term,logo_horizontal_key,logo_square_key,updated_at FROM tenant_settings WHERE tenant_key=?").bind(auth.tenantKey).first();
   return json({
     user: auth,
     settings: settings || { organization_name: "", academic_year: "", term: "", updated_at: "" },
@@ -719,6 +799,22 @@ function queueR2(ctx, promise, key) {
 }
 
 function csvCell(value) { return `"${String(value ?? "").replaceAll('"', '""')}"`; }
+function base64ToBytes(value) {
+  const base64 = value.includes(",") ? value.slice(value.indexOf(",") + 1) : value;
+  if (!base64 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) throw new Error("invalid base64");
+  const binary = atob(base64);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+function detectImageMime(bytes) {
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) return "image/png";
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes.length >= 12 && String.fromCharCode(...bytes.slice(0, 4)) === "RIFF" && String.fromCharCode(...bytes.slice(8, 12)) === "WEBP") return "image/webp";
+  return "";
+}
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(value)));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 function clean(value, max) { return String(value ?? "").trim().slice(0, max); }
 function positiveInt(value) { const n = Number(value); return Number.isInteger(n) && n > 0 ? n : 0; }
 function normalizeDays(value) { return String(value ?? "").split(",").map(Number).filter((n) => n >= 0 && n <= 6).filter((n, i, a) => a.indexOf(n) === i).join(","); }
