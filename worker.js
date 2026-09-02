@@ -9,6 +9,9 @@ export default {
         if (request.method === "OPTIONS") return corsPreflight(request, env);
         return withCors(await handleApi(request, env, ctx, url), request, env);
       }
+      if (url.pathname.startsWith("/checkin/")) {
+        return await renderCheckinPage(env, url.pathname.split("/").pop());
+      }
       if (url.pathname.startsWith("/share/")) {
         return await renderSharedSummary(env, url.pathname.split("/").pop());
       }
@@ -33,6 +36,8 @@ async function handleApi(request, env, ctx, url) {
   if (path === "/api/auth/login" && method === "GET") return beginAuth(url, env);
   if (path === "/api/auth/callback" && method === "GET") return finishAuth(request, url, env);
   if (path === "/api/auth/logout" && method === "GET") return logout(url, env);
+  if (path === "/api/checkin/claim" && method === "POST") return checkinClaim(request, env, ctx);
+  if (path === "/api/checkin/reset-device" && method === "POST") return resetCheckinDevice(request, env, ctx);
 
   const session = await authorize(request, env);
   if (!session) return json({ error: "กรุณาเข้าสู่ระบบ" }, 401);
@@ -51,6 +56,9 @@ async function handleApi(request, env, ctx, url) {
   }
   if (path === "/api/students" && method === "GET") return listStudents(env.DB, url, auth);
   if (path === "/api/students" && method === "POST") return createStudent(request, env, ctx, auth);
+  if (/^\/api\/students\/\d+$/.test(path) && method === "PATCH") {
+    return updateStudent(request, env, ctx, Number(path.split("/").pop()), auth);
+  }
   if (/^\/api\/students\/\d+$/.test(path) && method === "DELETE") {
     return deleteStudent(env, ctx, Number(path.split("/").pop()), auth);
   }
@@ -59,6 +67,11 @@ async function handleApi(request, env, ctx, url) {
   }
   if (path === "/api/attendance" && method === "GET") return getAttendance(env.DB, url, auth);
   if (path === "/api/attendance" && method === "POST") return saveAttendance(request, env, ctx, auth);
+  if (path === "/api/attendance/scan-card" && method === "POST") return scanStudentCard(request, env, ctx, auth);
+  if (path === "/api/checkin/sessions" && method === "POST") return createCheckinSession(request, env, ctx, url.origin, auth);
+  if (/^\/api\/checkin\/sessions\/\d+$/.test(path) && method === "DELETE") {
+    return closeCheckinSession(env, ctx, Number(path.split("/").pop()), auth);
+  }
   if (path === "/api/lessons" && method === "GET") return listLessons(env.DB, url, auth);
   if (path === "/api/lessons" && method === "POST") return saveLesson(request, env, ctx, auth);
   if (/^\/api\/lessons\/\d+$/.test(path) && method === "DELETE") {
@@ -299,7 +312,7 @@ function corsPreflight(request, env) {
   return new Response(null, { status: 204, headers: {
     "access-control-allow-origin": origin,
     "access-control-allow-credentials": "true",
-    "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
+    "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
     "access-control-allow-headers": "Authorization, Content-Type",
     "access-control-max-age": "86400",
     "vary": "Origin",
@@ -413,11 +426,16 @@ async function createStudent(request, env, ctx, auth) {
   const body = await readBody(request);
   const classroomId = positiveInt(body.classroom_id);
   const name = clean(body.name, 120);
+  const studentCode = clean(body.student_code, 120);
   if (!classroomId || !name) return json({ error: "ข้อมูลนักเรียนไม่ครบถ้วน" }, 400);
   const classroom = await env.DB.prepare("SELECT id FROM classrooms WHERE id=? AND tenant_key=?").bind(classroomId, auth.tenantKey).first();
   if (!classroom) return json({ error: "ไม่พบห้องเรียน" }, 404);
-  const result = await env.DB.prepare("INSERT INTO students(classroom_id, student_no, name, note) VALUES(?,?,?,?) RETURNING *")
-    .bind(classroomId, clean(body.student_no, 20), name, clean(body.note, 250)).first();
+  if (studentCode) {
+    const duplicate = await env.DB.prepare("SELECT id FROM students WHERE classroom_id=? AND student_code=?").bind(classroomId, studentCode).first();
+    if (duplicate) return json({ error: "รหัสนักเรียนนี้มีอยู่ในห้องแล้ว" }, 409);
+  }
+  const result = await env.DB.prepare("INSERT INTO students(classroom_id, student_no, student_code, name, note) VALUES(?,?,?,?,?) RETURNING *")
+    .bind(classroomId, clean(body.student_no, 20), studentCode, name, clean(body.note, 250)).first();
   archiveMutation(env, ctx, "student.created", result);
   return json(result, 201);
 }
@@ -431,6 +449,26 @@ async function deleteStudent(env, ctx, id, auth) {
   await env.DB.prepare("DELETE FROM students WHERE id=?").bind(id).run();
   archiveMutation(env, ctx, "student.deleted", existing);
   return json({ ok: true });
+}
+
+async function updateStudent(request, env, ctx, id, auth) {
+  const denied = requireRosterAdmin(auth);
+  if (denied) return denied;
+  const existing = await env.DB.prepare(`SELECT s.* FROM students s JOIN classrooms c ON c.id=s.classroom_id
+    WHERE s.id=? AND c.tenant_key=?`).bind(id, auth.tenantKey).first();
+  if (!existing) return json({ error: "ไม่พบนักเรียน" }, 404);
+  const body = await readBody(request);
+  const name = clean(body.name, 120);
+  const studentCode = clean(body.student_code, 120);
+  if (!name) return json({ error: "กรุณากรอกชื่อ-นามสกุล" }, 400);
+  if (studentCode) {
+    const duplicate = await env.DB.prepare("SELECT id FROM students WHERE classroom_id=? AND student_code=? AND id<>?").bind(existing.classroom_id, studentCode, id).first();
+    if (duplicate) return json({ error: "รหัสนักเรียนนี้มีอยู่ในห้องแล้ว" }, 409);
+  }
+  const student = await env.DB.prepare(`UPDATE students SET student_no=?,student_code=?,name=?,note=? WHERE id=? RETURNING *`)
+    .bind(clean(body.student_no, 20), studentCode, name, clean(body.note, 250), id).first();
+  archiveMutation(env, ctx, "student.updated", { ...student, updated_by: auth.sub });
+  return json(student);
 }
 
 async function studentHistory(db, id, auth) {
@@ -509,6 +547,111 @@ async function saveAttendance(request, env, ctx, auth) {
   return json({ ok: true, saved: records.length });
 }
 
+async function scanStudentCard(request, env, ctx, auth) {
+  const body = await readBody(request);
+  const classroomId = positiveInt(body.classroom_id);
+  const date = validDate(body.date) || bangkokDate();
+  const studentCode = clean(body.student_code, 120);
+  if (!classroomId || !studentCode) return json({ error: "ข้อมูลบัตรนักเรียนไม่ครบถ้วน" }, 400);
+  const matches = await env.DB.prepare(`SELECT s.id,s.name,s.student_no,s.student_code,c.name classroom_name FROM students s JOIN classrooms c ON c.id=s.classroom_id
+    WHERE s.classroom_id=? AND c.tenant_key=? AND s.student_code=? LIMIT 2`).bind(classroomId, auth.tenantKey, studentCode).all();
+  if (!matches.results.length) return json({ error: `ไม่พบรหัสนักเรียน ${studentCode}`, code: "STUDENT_CODE_NOT_FOUND" }, 404);
+  if (matches.results.length > 1) return json({ error: "พบรหัสนักเรียนซ้ำ กรุณาแก้ไขรายชื่อก่อนใช้งาน", code: "DUPLICATE_STUDENT_CODE" }, 409);
+  const student = matches.results[0];
+  await markStudentPresent(env.DB, classroomId, date, student.id, "สแกนบัตรนักเรียน");
+  archiveMutation(env, ctx, "attendance.card_scanned", { classroom_id: classroomId, date, student_id: student.id, student_code: studentCode, scanned_by: auth.sub });
+  return json({ ok: true, student, date });
+}
+
+async function createCheckinSession(request, env, ctx, origin, auth) {
+  const body = await readBody(request);
+  const classroomId = positiveInt(body.classroom_id);
+  const date = validDate(body.date) || bangkokDate();
+  const duration = Math.min(180, Math.max(5, positiveInt(body.duration_minutes) || 20));
+  const classroom = await env.DB.prepare("SELECT id,name FROM classrooms WHERE id=? AND tenant_key=?").bind(classroomId, auth.tenantKey).first();
+  if (!classroom) return json({ error: "ไม่พบห้องเรียน" }, 404);
+  const token = `${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
+  const tokenHash = await sha256Hex(token);
+  const expiresAt = new Date(Date.now() + duration * 60000).toISOString();
+  const session = await env.DB.prepare(`INSERT INTO checkin_sessions(token_hash,tenant_key,classroom_id,session_date,expires_at,created_by)
+    VALUES(?,?,?,?,?,?) RETURNING id`).bind(tokenHash, auth.tenantKey, classroomId, date, expiresAt, auth.sub).first();
+  archiveMutation(env, ctx, "checkin.session.created", { id: session.id, classroom_id: classroomId, date, expires_at: expiresAt, created_by: auth.sub });
+  return json({ id: session.id, classroom, date, expires_at: expiresAt, url: `${origin}/checkin/${token}` }, 201);
+}
+
+async function closeCheckinSession(env, ctx, id, auth) {
+  const session = await env.DB.prepare(`SELECT cs.id,cs.classroom_id FROM checkin_sessions cs JOIN classrooms c ON c.id=cs.classroom_id
+    WHERE cs.id=? AND cs.tenant_key=? AND c.tenant_key=?`).bind(id, auth.tenantKey, auth.tenantKey).first();
+  if (!session) return json({ error: "ไม่พบรอบรับเช็คชื่อ" }, 404);
+  await env.DB.prepare("UPDATE checkin_sessions SET active=0 WHERE id=?").bind(id).run();
+  archiveMutation(env, ctx, "checkin.session.closed", { id, classroom_id: session.classroom_id, closed_by: auth.sub });
+  return json({ ok: true });
+}
+
+async function checkinClaim(request, env, ctx) {
+  const body = await readBody(request);
+  const token = clean(body.token, 160);
+  const studentId = positiveInt(body.student_id);
+  if (!token || !studentId) return json({ error: "ข้อมูลเช็คชื่อไม่ครบถ้วน" }, 400);
+  const tokenHash = await sha256Hex(token);
+  const session = await env.DB.prepare(`SELECT cs.*,c.name classroom_name FROM checkin_sessions cs JOIN classrooms c ON c.id=cs.classroom_id
+    WHERE cs.token_hash=?`).bind(tokenHash).first();
+  if (!session || !Number(session.active) || Date.parse(session.expires_at) <= Date.now()) return json({ error: "QR นี้หมดอายุหรือปิดรับเช็คชื่อแล้ว", code: "CHECKIN_CLOSED" }, 410);
+  const student = await env.DB.prepare("SELECT id,name,student_no FROM students WHERE id=? AND classroom_id=?").bind(studentId, session.classroom_id).first();
+  if (!student) return json({ error: "ไม่พบนักเรียนในห้องนี้" }, 404);
+  const device = await checkinDevice(request, env);
+  const deviceHash = await sha256Hex(`${session.tenant_key}\0${device.id}`);
+  const binding = await env.DB.prepare(`SELECT cd.*,s.name student_name FROM checkin_devices cd JOIN students s ON s.id=cd.student_id
+    WHERE cd.tenant_key=? AND cd.classroom_id=? AND cd.device_hash=?`).bind(session.tenant_key, session.classroom_id, deviceHash).first();
+  if (binding && Number(binding.student_id) !== studentId) {
+    const message = Date.parse(binding.reset_after) > Date.now()
+      ? `อุปกรณ์นี้ผูกกับ ${binding.student_name} แล้ว รีเซ็ตได้หลัง ${formatThaiDateTime(binding.reset_after)}`
+      : `อุปกรณ์นี้ผูกกับ ${binding.student_name} แล้ว กรุณากดรีเซ็ตอุปกรณ์ก่อนเปลี่ยนชื่อ`;
+    return json({ error: message, code: "DEVICE_BOUND", reset_after: binding.reset_after }, 409, device.cookie);
+  }
+  const resetAfter = new Date(Date.now() + 7 * 86400000).toISOString();
+  await env.DB.prepare(`INSERT INTO checkin_devices(tenant_key,classroom_id,device_hash,student_id,reset_after,last_seen_at)
+    VALUES(?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(tenant_key,classroom_id,device_hash) DO UPDATE SET
+    student_id=excluded.student_id,bound_at=CASE WHEN checkin_devices.student_id<>excluded.student_id THEN CURRENT_TIMESTAMP ELSE checkin_devices.bound_at END,
+    reset_after=CASE WHEN checkin_devices.student_id<>excluded.student_id THEN excluded.reset_after ELSE checkin_devices.reset_after END,last_seen_at=CURRENT_TIMESTAMP`)
+    .bind(session.tenant_key, session.classroom_id, deviceHash, studentId, resetAfter).run();
+  await markStudentPresent(env.DB, session.classroom_id, session.session_date, studentId, "เช็คชื่อผ่าน QR");
+  archiveMutation(env, ctx, "attendance.qr_checked_in", { checkin_session_id: session.id, classroom_id: session.classroom_id, date: session.session_date, student_id: studentId, device_hash: deviceHash });
+  return json({ ok: true, student, classroom: session.classroom_name, date: session.session_date }, 200, device.cookie);
+}
+
+async function resetCheckinDevice(request, env, ctx) {
+  const body = await readBody(request);
+  const token = clean(body.token, 160);
+  if (!token) return json({ error: "QR ไม่ถูกต้อง" }, 400);
+  const session = await env.DB.prepare("SELECT * FROM checkin_sessions WHERE token_hash=?").bind(await sha256Hex(token)).first();
+  if (!session || !Number(session.active) || Date.parse(session.expires_at) <= Date.now()) return json({ error: "QR นี้หมดอายุหรือปิดรับเช็คชื่อแล้ว" }, 410);
+  const device = await checkinDevice(request, env);
+  const deviceHash = await sha256Hex(`${session.tenant_key}\0${device.id}`);
+  const binding = await env.DB.prepare("SELECT * FROM checkin_devices WHERE tenant_key=? AND classroom_id=? AND device_hash=?").bind(session.tenant_key, session.classroom_id, deviceHash).first();
+  if (!binding) return json({ ok: true, reset: false }, 200, device.cookie);
+  if (Date.parse(binding.reset_after) > Date.now()) return json({ error: `รีเซ็ตอุปกรณ์ได้หลัง ${formatThaiDateTime(binding.reset_after)}`, code: "RESET_NOT_READY", reset_after: binding.reset_after }, 409, device.cookie);
+  await env.DB.prepare("DELETE FROM checkin_devices WHERE id=?").bind(binding.id).run();
+  archiveMutation(env, ctx, "checkin.device.reset", { classroom_id: session.classroom_id, student_id: binding.student_id, device_hash: deviceHash });
+  return json({ ok: true, reset: true }, 200, device.cookie);
+}
+
+async function markStudentPresent(db, classroomId, date, studentId, note) {
+  const session = await db.prepare(`INSERT INTO attendance_sessions(classroom_id,session_date,note) VALUES(?,?,'')
+    ON CONFLICT(classroom_id,session_date) DO UPDATE SET session_date=excluded.session_date RETURNING id`).bind(classroomId, date).first();
+  await db.prepare(`INSERT INTO attendance(session_id,student_id,status,note,updated_at) VALUES(?,?,'present',?,CURRENT_TIMESTAMP)
+    ON CONFLICT(session_id,student_id) DO UPDATE SET status='present',note=excluded.note,updated_at=CURRENT_TIMESTAMP`).bind(session.id, studentId, note).run();
+}
+
+async function checkinDevice(request, env) {
+  const value = getCookie(request, "classroom_checkin_device");
+  const [id, signature] = value.split(".");
+  if (id && signature && timingSafeEqual(signature, await sign(id, await sessionSigningSecret(env)))) return { id, cookie: "" };
+  const newId = crypto.randomUUID().replaceAll("-", "");
+  const signed = `${newId}.${await sign(newId, await sessionSigningSecret(env))}`;
+  return { id: newId, cookie: `classroom_checkin_device=${signed}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=31536000` };
+}
+
 async function listLessons(db, url, auth) {
   const classroomId = positiveInt(url.searchParams.get("classroom_id"));
   if (!classroomId) return json({ error: "classroom_id ไม่ถูกต้อง" }, 400);
@@ -581,6 +724,25 @@ async function renderSharedSummary(env, token) {
   body{margin:0;background:#f5f5f7;color:#111;font-family:system-ui,sans-serif}.wrap{max-width:620px;margin:auto;padding:28px 18px}.card{background:#fff;border:1px solid #ddd;border-radius:24px;padding:24px;box-shadow:0 12px 35px #0000000d}h1{margin:0 0 4px;font-size:26px}.muted{color:#666}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:22px 0}.stat{border:1px solid #ddd;border-radius:14px;padding:12px;text-align:center}.stat b{font-size:24px;display:block}.red{color:#c8102e}ul{list-style:none;padding:0;margin:0}li{display:flex;justify-content:space-between;border-top:1px solid #eee;padding:12px 0}.late,.absent,.leave{color:#c8102e;font-weight:700}@media(max-width:460px){.grid{grid-template-columns:repeat(2,1fr)}}</style><body><main class="wrap"><section class="card"><p class="muted">สรุปการเช็คชื่อ</p><h1>${escapeHtml(data.classroom)}</h1><p>${formatThaiDate(data.date)}</p><div class="grid"><div class="stat"><b>${data.counts.present}</b>มา</div><div class="stat"><b>${data.counts.late}</b>สาย</div><div class="stat"><b class="red">${data.counts.absent}</b>ขาด</div><div class="stat"><b>${data.counts.leave}</b>ลา</div></div><h2>รายการที่ต้องติดตาม</h2>${attention ? `<ul>${attention}</ul>` : '<p class="muted">นักเรียนมาครบทุกคน</p>'}</section></main></body></html>`, { headers: { "content-type": "text/html; charset=utf-8", "x-robots-tag": "noindex, nofollow", "cache-control": "private, no-store" } });
 }
 
+async function renderCheckinPage(env, token) {
+  token = clean(token, 160);
+  if (!token) return new Response("QR ไม่ถูกต้อง", { status: 404 });
+  const tokenHash = await sha256Hex(token);
+  const session = await env.DB.prepare(`SELECT cs.*,c.name classroom_name FROM checkin_sessions cs JOIN classrooms c ON c.id=cs.classroom_id
+    WHERE cs.token_hash=?`).bind(tokenHash).first();
+  const open = session && Number(session.active) && Date.parse(session.expires_at) > Date.now();
+  if (!open) return new Response(checkinHtml("ปิดรับเช็คชื่อแล้ว", "QR นี้หมดอายุหรือครูปิดรับเช็คชื่อแล้ว", ""), { status: 410, headers: { "content-type": "text/html; charset=utf-8", "x-robots-tag": "noindex, nofollow", "cache-control": "no-store" } });
+  const students = await env.DB.prepare(`SELECT id,student_no,name FROM students WHERE classroom_id=?
+    ORDER BY CASE WHEN student_no='' THEN 1 ELSE 0 END,CAST(student_no AS INTEGER),name`).bind(session.classroom_id).all();
+  const options = students.results.map((student) => `<option value="${student.id}">${escapeHtml(student.student_no ? `${student.student_no} · ` : "")}${escapeHtml(student.name)}</option>`).join("");
+  const form = `<p class="classroom">${escapeHtml(session.classroom_name)} · ${formatThaiDate(session.session_date)}</p><label for="student">เลือกชื่อของคุณ</label><select id="student"><option value="">— กรุณาเลือก —</option>${options}</select><button id="submit"><i>✓</i> ยืนยันการเข้าเรียน</button><button class="secondary" id="reset">รีเซ็ตชื่อบนอุปกรณ์นี้</button><p class="note">อุปกรณ์นี้จะผูกกับชื่อที่เลือกเป็นเวลา 7 วัน เพื่อป้องกันการเช็คชื่อแทนกัน และต้องกดรีเซ็ตก่อนจึงจะเปลี่ยนชื่อได้</p><p id="message" role="alert"></p><script>const token=${JSON.stringify(token)},message=document.getElementById('message');document.getElementById('submit').onclick=async()=>{const button=document.getElementById('submit'),student_id=Number(document.getElementById('student').value);if(!student_id){message.textContent='กรุณาเลือกชื่อของคุณ';return}button.disabled=true;message.textContent='กำลังบันทึก...';try{const response=await fetch('/api/checkin/claim',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token,student_id})});const data=await response.json();if(!response.ok)throw new Error(data.error||'บันทึกไม่สำเร็จ');const card=document.querySelector('.card');card.textContent='';const success=document.createElement('div');success.className='success';success.textContent='✓';const heading=document.createElement('h1');heading.textContent='เช็คชื่อสำเร็จ';const name=document.createElement('p');name.textContent=data.student.name;const room=document.createElement('p');room.className='classroom';room.textContent=data.classroom;card.append(success,heading,name,room)}catch(error){message.textContent=error.message;button.disabled=false}};document.getElementById('reset').onclick=async()=>{if(!confirm('ต้องการรีเซ็ตชื่อที่ผูกกับอุปกรณ์นี้หรือไม่?'))return;message.textContent='กำลังตรวจสอบสิทธิ์รีเซ็ต...';try{const response=await fetch('/api/checkin/reset-device',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token})});const data=await response.json();if(!response.ok)throw new Error(data.error||'รีเซ็ตไม่สำเร็จ');message.textContent=data.reset?'รีเซ็ตแล้ว กรุณาเลือกชื่อใหม่':'อุปกรณ์นี้ยังไม่ได้ผูกกับชื่อ'}catch(error){message.textContent=error.message}}</script>`;
+  return new Response(checkinHtml("เช็คชื่อเข้าเรียน", "เลือกชื่อและยืนยันด้วยอุปกรณ์ของคุณ", form), { headers: { "content-type": "text/html; charset=utf-8", "x-robots-tag": "noindex, nofollow", "cache-control": "private, no-store" } });
+}
+
+function checkinHtml(title, subtitle, content) {
+  return `<!doctype html><html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>${escapeHtml(title)} · /sorasukt Classroom</title><style>:root{--ink:#161514;--muted:#7a7873;--red:#ff3b30;--line:#e6e6e4}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px;background:#f5f5f3;color:var(--ink);font-family:system-ui,"Noto Sans Thai",sans-serif}.card{width:min(440px,100%);padding:28px;border:1px solid var(--line);border-radius:22px;background:#fff;box-shadow:0 20px 60px -45px #000}.logo{display:grid;place-items:center;width:42px;height:42px;margin-bottom:24px;border:2px solid var(--ink);border-radius:7px;box-shadow:2px 2px 0 var(--ink);font-weight:800}h1{margin:0;font-size:26px}header>p,.classroom,.note{color:var(--muted)}label{display:block;margin:24px 0 6px;font-size:13px;font-weight:700}select,button{width:100%;min-height:48px;border-radius:10px;font:inherit}select{padding:8px 12px;border:1px solid var(--line);background:#fff}button{margin-top:12px;border:0;background:var(--ink);color:#fff;font-weight:700}button.secondary{border:1px solid var(--line);background:#fff;color:var(--muted);font-weight:600}button:disabled{opacity:.5}.note{font-size:12px;line-height:1.6}#message{min-height:24px;color:var(--red);font-size:13px}.success{display:grid;place-items:center;width:60px;height:60px;margin-bottom:20px;border-radius:50%;background:#111;color:#fff;font-size:28px}.credit{margin-top:20px;text-align:center;color:var(--muted);font-size:11px}</style></head><body><main><section class="card"><div class="logo">C</div><header><h1>${escapeHtml(title)}</h1><p>${escapeHtml(subtitle)}</p></header>${content}</section><p class="credit">Powered by /sorasukt Classroom</p></main></body></html>`;
+}
+
 async function exportCsv(env, ctx, url, auth) {
   const classroomId = positiveInt(url.searchParams.get("classroom_id"));
   const from = validDate(url.searchParams.get("from")) || "1900-01-01";
@@ -588,13 +750,13 @@ async function exportCsv(env, ctx, url, auth) {
   if (!classroomId) return json({ error: "classroom_id ไม่ถูกต้อง" }, 400);
   const classroom = await env.DB.prepare("SELECT name FROM classrooms WHERE id=? AND tenant_key=?").bind(classroomId, auth.tenantKey).first();
   if (!classroom) return json({ error: "ไม่พบห้องเรียน" }, 404);
-  const rows = await env.DB.prepare(`SELECT s.student_no,s.name,ss.session_date,a.status,a.note
+  const rows = await env.DB.prepare(`SELECT s.student_no,s.student_code,s.name,ss.session_date,a.status,a.note
     FROM students s LEFT JOIN attendance a ON a.student_id=s.id LEFT JOIN attendance_sessions ss ON ss.id=a.session_id
     WHERE s.classroom_id=? AND (ss.session_date BETWEEN ? AND ? OR ss.session_date IS NULL)
     ORDER BY CAST(s.student_no AS INTEGER),s.name,ss.session_date`).bind(classroomId, from, to).all();
   const labels = { present: "มา", late: "สาย", absent: "ขาด", leave: "ลา" };
-  const header = ["เลขที่", "ชื่อ-นามสกุล", "วันที่", "สถานะ", "หมายเหตุ"];
-  const lines = [header, ...rows.results.map((r) => [r.student_no, r.name, r.session_date || "", labels[r.status] || "ยังไม่มีประวัติ", r.note || ""])];
+  const header = ["เลขที่", "รหัสนักเรียน", "ชื่อ-นามสกุล", "วันที่", "สถานะ", "หมายเหตุ"];
+  const lines = [header, ...rows.results.map((r) => [r.student_no, r.student_code, r.name, r.session_date || "", labels[r.status] || "ยังไม่มีประวัติ", r.note || ""])];
   const csv = "\uFEFF" + lines.map((row) => row.map(csvCell).join(",")).join("\r\n");
   const filename = `attendance-${classroomId}-${bangkokDate()}.csv`;
   if (env.EXPORTS) {
@@ -711,9 +873,9 @@ function studentTemplate(auth) {
   const denied = requireRosterAdmin(auth);
   if (denied) return denied;
   const csv = "\uFEFF" + [
-    ["student_no", "name", "note"],
-    ["1", "เด็กชายตัวอย่าง นักเรียน", ""],
-    ["2", "เด็กหญิงตัวอย่าง ห้องเรียน", "แพ้อาหารทะเล"],
+    ["student_no", "student_code", "name", "note"],
+    ["1", "66010001", "เด็กชายตัวอย่าง นักเรียน", ""],
+    ["2", "66010002", "เด็กหญิงตัวอย่าง ห้องเรียน", "แพ้อาหารทะเล"],
   ].map((row) => row.map(csvCell).join(",")).join("\r\n");
   return new Response(csv, { headers: {
     "content-type": "text/csv; charset=utf-8",
@@ -738,17 +900,18 @@ async function importStudents(request, env, ctx, auth) {
   let skipped = 0;
   for (const row of rows) {
     const studentNo = clean(row?.student_no, 20);
+    const studentCode = clean(row?.student_code, 120);
     const name = clean(row?.name, 120);
     const note = clean(row?.note, 250);
     if (!name) { skipped++; continue; }
-    const existing = studentNo
-      ? await env.DB.prepare("SELECT id FROM students WHERE classroom_id=? AND student_no=? LIMIT 1").bind(classroomId, studentNo).first()
-      : null;
+    const existing = await env.DB.prepare(`SELECT id FROM students WHERE classroom_id=? AND
+      ((student_code=? AND ?<>'') OR (student_no=? AND ?<>'')) ORDER BY student_code=? DESC LIMIT 1`)
+      .bind(classroomId, studentCode, studentCode, studentNo, studentNo, studentCode).first();
     if (existing) {
-      await env.DB.prepare("UPDATE students SET name=?,note=? WHERE id=?").bind(name, note, existing.id).run();
+      await env.DB.prepare("UPDATE students SET student_no=?,student_code=?,name=?,note=? WHERE id=?").bind(studentNo, studentCode, name, note, existing.id).run();
       updated++;
     } else {
-      await env.DB.prepare("INSERT INTO students(classroom_id,student_no,name,note) VALUES(?,?,?,?)").bind(classroomId, studentNo, name, note).run();
+      await env.DB.prepare("INSERT INTO students(classroom_id,student_no,student_code,name,note) VALUES(?,?,?,?,?)").bind(classroomId, studentNo, studentCode, name, note).run();
       inserted++;
     }
   }
@@ -850,6 +1013,7 @@ function validDate(value) { return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""
 function bangkokDate() { return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Bangkok", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()); }
 function shiftDate(value, days) { const date = new Date(`${value}T12:00:00Z`); date.setUTCDate(date.getUTCDate() + days); return date.toISOString().slice(0, 10); }
 function formatThaiDate(value) { return new Intl.DateTimeFormat("th-TH", { dateStyle: "long", timeZone: "Asia/Bangkok" }).format(new Date(`${value}T12:00:00+07:00`)); }
+function formatThaiDateTime(value) { return new Intl.DateTimeFormat("th-TH", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Bangkok" }).format(new Date(value)); }
 function escapeHtml(value) { return String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[c])); }
 async function readBody(request) { try { return await request.json(); } catch { return {}; } }
-function json(value, status = 200) { return new Response(JSON.stringify(value), { status, headers: JSON_HEADERS }); }
+function json(value, status = 200, cookie = "") { const headers = new Headers(JSON_HEADERS); if (cookie) headers.set("set-cookie", cookie); return new Response(JSON.stringify(value), { status, headers }); }
