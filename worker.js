@@ -34,9 +34,13 @@ async function handleApi(request, env, ctx, url) {
   if (path === "/api/auth/callback" && method === "GET") return finishAuth(request, url, env);
   if (path === "/api/auth/logout" && method === "GET") return logout(url, env);
 
-  const auth = await authorize(request, env);
-  if (!auth) return json({ error: "กรุณาเข้าสู่ระบบ" }, 401);
+  const session = await authorize(request, env);
+  if (!session) return json({ error: "กรุณาเข้าสู่ระบบ" }, 401);
+  const auth = await resolveSchoolAccess(env.DB, session);
   if (path === "/api/session" && method === "GET") return json({ user: auth });
+  if (auth.schoolDomain && !auth.schoolAccess) {
+    return json({ error: auth.schoolVerified ? "อีเมลนี้ยังไม่ได้รับสิทธิ์จาก Admin ของโรงเรียน" : "กรุณายืนยันอีเมลโรงเรียนก่อนเข้าใช้งาน", code: "SCHOOL_ACCESS_REQUIRED" }, 403);
+  }
 
   if (path === "/api/bootstrap" && method === "GET") return bootstrap(env.DB, auth);
   if (path === "/api/dashboard" && method === "GET") return dashboard(env.DB, auth);
@@ -66,6 +70,11 @@ async function handleApi(request, env, ctx, url) {
   if (path === "/api/admin/settings" && method === "POST") return saveAdminSettings(request, env, ctx, auth);
   if (path === "/api/admin/student-template.csv" && method === "GET") return studentTemplate(auth);
   if (path === "/api/admin/import/students" && method === "POST") return importStudents(request, env, ctx, auth);
+  if (path === "/api/admin/members" && method === "GET") return listSchoolMembers(env.DB, auth);
+  if (path === "/api/admin/members" && method === "POST") return saveSchoolMember(request, env, ctx, auth);
+  if (/^\/api\/admin\/members\/\d+$/.test(path) && method === "DELETE") {
+    return deleteSchoolMember(env, ctx, Number(path.split("/").pop()), auth);
+  }
 
   return json({ error: "ไม่พบรายการที่ร้องขอ" }, 404);
 }
@@ -192,7 +201,7 @@ function buildAuthContext(session) {
   const schoolDomain = /^[a-z0-9.-]+\.ac\.th$/i.test(domain);
   const schoolVerified = !schoolDomain || session?.emailVerified === true;
   const roles = Array.isArray(session?.roles) ? session.roles.map((role) => clean(role, 80)).filter(Boolean) : [];
-  const isAdmin = roles.some((role) => role.toLowerCase() === "admin");
+  const auth0Admin = roles.some((role) => role.toLowerCase() === "admin");
   const sub = clean(session?.sub, 180);
   return {
     ...session,
@@ -201,11 +210,28 @@ function buildAuthContext(session) {
     domain,
     schoolDomain,
     roles,
-    isAdmin,
+    auth0Admin,
+    isAdmin: auth0Admin,
     schoolVerified,
-    canManageRoster: !schoolDomain || (schoolVerified && isAdmin),
+    schoolAccess: !schoolDomain,
+    canManageRoster: !schoolDomain || (schoolVerified && auth0Admin),
     tenantKey: schoolDomain && schoolVerified ? `school:${domain}` : `user:${sub}`,
   };
+}
+
+async function resolveSchoolAccess(db, auth) {
+  if (!auth.schoolDomain) return { ...auth, schoolAccess: true, canManageRoster: true };
+  if (!auth.schoolVerified) return { ...auth, schoolAccess: false, isAdmin: false, canManageRoster: false };
+  if (auth.auth0Admin) {
+    await db.prepare(`INSERT INTO school_members(tenant_key,email,role,active,created_by,updated_at) VALUES(?,?,'admin',1,?,CURRENT_TIMESTAMP)
+      ON CONFLICT(tenant_key,email) DO UPDATE SET role='admin',active=1,updated_at=CURRENT_TIMESTAMP`)
+      .bind(auth.tenantKey, auth.email, auth.sub).run();
+    return { ...auth, schoolAccess: true, isAdmin: true, canManageRoster: true, schoolRole: "admin" };
+  }
+  const member = await db.prepare("SELECT role,active FROM school_members WHERE tenant_key=? AND email=?").bind(auth.tenantKey, auth.email).first();
+  const schoolAccess = Number(member?.active) === 1;
+  const isAdmin = schoolAccess && member?.role === "admin";
+  return { ...auth, schoolAccess, isAdmin, canManageRoster: isAdmin, schoolRole: schoolAccess ? member.role : "" };
 }
 
 function requireRosterAdmin(auth) {
@@ -621,6 +647,52 @@ async function importStudents(request, env, ctx, auth) {
   const summary = { classroom_id: classroomId, classroom: classroom.name, inserted, updated, skipped, total: rows.length, imported_by: auth.sub };
   archiveMutation(env, ctx, "students.imported", summary);
   return json({ ok: true, ...summary });
+}
+
+function requireSchoolAdmin(auth) {
+  if (!auth.schoolDomain) return json({ error: "ตารางบัญชีโรงเรียนใช้ได้เฉพาะโดเมน .ac.th" }, 400);
+  if (!auth.schoolVerified || !auth.isAdmin) return json({ error: "ต้องเป็น Admin ของโรงเรียนจึงจะจัดการบัญชีได้", code: "ADMIN_REQUIRED" }, 403);
+  return null;
+}
+
+async function listSchoolMembers(db, auth) {
+  const denied = requireSchoolAdmin(auth);
+  if (denied) return denied;
+  const result = await db.prepare(`SELECT id,email,role,active,created_at,updated_at FROM school_members
+    WHERE tenant_key=? ORDER BY role='admin' DESC, active DESC, email`).bind(auth.tenantKey).all();
+  return json({ domain: auth.domain, members: result.results });
+}
+
+async function saveSchoolMember(request, env, ctx, auth) {
+  const denied = requireSchoolAdmin(auth);
+  if (denied) return denied;
+  const body = await readBody(request);
+  const email = clean(body.email, 254).toLowerCase();
+  const role = body.role === "admin" ? "admin" : "member";
+  const active = body.active === false || body.active === 0 ? 0 : 1;
+  if (!/^[^\s@]+@[^\s@]+$/.test(email) || email.split("@").pop() !== auth.domain) {
+    return json({ error: `อีเมลต้องลงท้ายด้วย @${auth.domain}` }, 400);
+  }
+  if (email === auth.email && (role !== "admin" || active !== 1)) {
+    return json({ error: "ไม่สามารถลดสิทธิ์หรือปิดบัญชี Admin ที่กำลังใช้งานอยู่" }, 400);
+  }
+  const member = await env.DB.prepare(`INSERT INTO school_members(tenant_key,email,role,active,created_by,updated_at)
+    VALUES(?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(tenant_key,email) DO UPDATE SET
+    role=excluded.role,active=excluded.active,updated_at=CURRENT_TIMESTAMP RETURNING id,email,role,active,created_at,updated_at`)
+    .bind(auth.tenantKey, email, role, active, auth.sub).first();
+  archiveMutation(env, ctx, "school.member.saved", { ...member, tenant_key: auth.tenantKey, updated_by: auth.sub });
+  return json(member, 201);
+}
+
+async function deleteSchoolMember(env, ctx, id, auth) {
+  const denied = requireSchoolAdmin(auth);
+  if (denied) return denied;
+  const member = await env.DB.prepare("SELECT * FROM school_members WHERE id=? AND tenant_key=?").bind(id, auth.tenantKey).first();
+  if (!member) return json({ error: "ไม่พบบัญชีโรงเรียน" }, 404);
+  if (member.email === auth.email) return json({ error: "ไม่สามารถลบบัญชี Admin ที่กำลังใช้งานอยู่" }, 400);
+  await env.DB.prepare("DELETE FROM school_members WHERE id=? AND tenant_key=?").bind(id, auth.tenantKey).run();
+  archiveMutation(env, ctx, "school.member.deleted", { ...member, deleted_by: auth.sub });
+  return json({ ok: true });
 }
 
 function archiveMutation(env, ctx, type, payload) {
