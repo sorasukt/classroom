@@ -974,20 +974,22 @@ async function exportCsv(env, ctx, url, auth) {
 }
 
 async function brandingContext(db, auth) {
-  if (!auth.schoolDomain || !auth.schoolVerified || !auth.schoolAccess) {
-    return json({ custom: false, organization_name: "", academic_year: "", term: "", logos: { horizontal: false, square: false } });
+  const school = Boolean(auth.schoolDomain);
+  if (school && (!auth.schoolVerified || !auth.schoolAccess)) {
+    return json({ custom: false, school: true, organization_name: "", academic_year: "", term: "", logos: { horizontal: false, square: false } });
   }
   const settings = await db.prepare(`SELECT organization_name,academic_year,term,logo_horizontal_key,logo_square_key
     FROM tenant_settings WHERE tenant_key=?`).bind(auth.tenantKey).first();
   const custom = Boolean(settings?.organization_name);
   return json({
     custom,
+    school,
     organization_name: settings?.organization_name || "",
     academic_year: settings?.academic_year || "",
     term: settings?.term || "",
     logos: {
-      horizontal: custom && Boolean(settings?.logo_horizontal_key),
-      square: custom && Boolean(settings?.logo_square_key),
+      horizontal: school && custom && Boolean(settings?.logo_horizontal_key),
+      square: school && custom && Boolean(settings?.logo_square_key),
     },
   });
 }
