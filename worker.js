@@ -22,6 +22,9 @@ export default {
       return url.pathname.startsWith("/api/") ? withCors(response, request, env) : response;
     }
   },
+  async scheduled(_controller, env, ctx) {
+    ctx.waitUntil(materializeAttendanceSessions(env.DB, bangkokDate()));
+  },
 };
 
 async function handleApi(request, env, ctx, url) {
@@ -54,13 +57,23 @@ async function handleApi(request, env, ctx, url) {
   if (/^\/api\/classrooms\/\d+$/.test(path) && method === "DELETE") {
     return deleteClassroom(env, ctx, Number(path.split("/").pop()), auth);
   }
+  if (path === "/api/student-directory" && method === "GET") return listStudentDirectory(env.DB, url, auth);
+  if (path === "/api/student-directory" && method === "POST") return createDirectoryStudent(request, env, ctx, auth);
+  if (/^\/api\/student-directory\/\d+$/.test(path) && method === "PATCH") {
+    return updateDirectoryStudent(request, env, ctx, Number(path.split("/").pop()), auth);
+  }
+  if (/^\/api\/student-directory\/\d+$/.test(path) && method === "DELETE") {
+    return archiveDirectoryStudent(env, ctx, Number(path.split("/").pop()), auth);
+  }
+  if (path === "/api/enrollments" && method === "POST") return saveEnrollment(request, env, ctx, auth);
+  if (path === "/api/enrollments" && method === "DELETE") return removeEnrollment(env, ctx, url, auth);
   if (path === "/api/students" && method === "GET") return listStudents(env.DB, url, auth);
   if (path === "/api/students" && method === "POST") return createStudent(request, env, ctx, auth);
   if (/^\/api\/students\/\d+$/.test(path) && method === "PATCH") {
     return updateStudent(request, env, ctx, Number(path.split("/").pop()), auth);
   }
   if (/^\/api\/students\/\d+$/.test(path) && method === "DELETE") {
-    return deleteStudent(env, ctx, Number(path.split("/").pop()), auth);
+    return deleteStudent(env, ctx, url, Number(path.split("/").pop()), auth);
   }
   if (/^\/api\/students\/\d+\/history$/.test(path) && method === "GET") {
     return studentHistory(env.DB, Number(path.split("/")[3]), auth);
@@ -71,6 +84,11 @@ async function handleApi(request, env, ctx, url) {
   if (path === "/api/checkin/sessions" && method === "POST") return createCheckinSession(request, env, ctx, url.origin, auth);
   if (/^\/api\/checkin\/sessions\/\d+$/.test(path) && method === "DELETE") {
     return closeCheckinSession(env, ctx, Number(path.split("/").pop()), auth);
+  }
+  if (path === "/api/timetable" && method === "GET") return listTimetable(env.DB, auth);
+  if (path === "/api/timetable" && method === "POST") return saveTimetableEntry(request, env, ctx, auth);
+  if (/^\/api\/timetable\/\d+$/.test(path) && method === "DELETE") {
+    return deleteTimetableEntry(env, ctx, Number(path.split("/").pop()), auth);
   }
   if (path === "/api/lessons" && method === "GET") return listLessons(env.DB, url, auth);
   if (path === "/api/lessons" && method === "POST") return saveLesson(request, env, ctx, auth);
@@ -363,22 +381,28 @@ async function claimLegacyData(db, auth) {
 async function dashboard(db, auth) {
   const today = bangkokDate();
   const weekday = new Date(`${today}T12:00:00+07:00`).getDay();
+  await materializeAttendanceSessions(db, today, auth.tenantKey);
   const [counts, rate, todayClasses] = await Promise.all([
     db.prepare(`SELECT
       (SELECT COUNT(*) FROM classrooms WHERE tenant_key=?) classrooms,
-      (SELECT COUNT(*) FROM students s JOIN classrooms c ON c.id=s.classroom_id WHERE c.tenant_key=?) students,
+      (SELECT COUNT(*) FROM student_profiles WHERE tenant_key=? AND active=1) students,
       (SELECT COUNT(*) FROM lesson_plans l JOIN classrooms c ON c.id=l.classroom_id WHERE c.tenant_key=?) lessons`).bind(auth.tenantKey, auth.tenantKey, auth.tenantKey).first(),
     db.prepare(`SELECT ROUND(100.0 * SUM(CASE WHEN a.status IN ('present','late') THEN 1 ELSE 0 END) / NULLIF(COUNT(a.id), 0), 1) rate
       FROM attendance a JOIN attendance_sessions s ON s.id=a.session_id JOIN classrooms c ON c.id=s.classroom_id
       WHERE c.tenant_key=? AND s.session_date >= date(?, '-13 day')`).bind(auth.tenantKey, today).first(),
-    db.prepare(`SELECT c.*, COUNT(st.id) student_count FROM classrooms c LEFT JOIN students st ON st.classroom_id=c.id
-      WHERE c.tenant_key=? AND ',' || c.schedule_days || ',' LIKE '%,' || ? || ',%' GROUP BY c.id ORDER BY c.start_time`).bind(auth.tenantKey, String(weekday)).all(),
+    db.prepare(`SELECT c.*,te.start_time,te.end_time,COALESCE(NULLIF(te.room,''),c.room) room,te.teacher_name,
+      COUNT(DISTINCT ce.student_id) student_count,COUNT(DISTINCT a.student_id) attendance_count
+      FROM timetable_entries te JOIN classrooms c ON c.id=te.classroom_id
+      LEFT JOIN classroom_enrollments ce ON ce.classroom_id=c.id AND ce.active=1
+      LEFT JOIN attendance_sessions ss ON ss.classroom_id=c.id AND ss.session_date=?
+      LEFT JOIN attendance a ON a.session_id=ss.id
+      WHERE te.tenant_key=? AND te.weekday=? AND te.active=1 GROUP BY te.id ORDER BY te.start_time`).bind(today, auth.tenantKey, weekday).all(),
   ]);
   return json({ ...counts, attendanceRate: rate?.rate ?? 0, todayClasses: todayClasses.results, date: today });
 }
 
 async function listClassrooms(db, auth) {
-  const result = await db.prepare(`SELECT c.*, COUNT(s.id) student_count FROM classrooms c LEFT JOIN students s ON s.classroom_id=c.id
+  const result = await db.prepare(`SELECT c.*, COUNT(e.student_id) student_count FROM classrooms c LEFT JOIN classroom_enrollments e ON e.classroom_id=c.id AND e.active=1
     WHERE c.tenant_key=? GROUP BY c.id ORDER BY c.created_at DESC`).bind(auth.tenantKey).all();
   return json(result.results);
 }
@@ -389,8 +413,16 @@ async function createClassroom(request, env, ctx, auth) {
   const body = await readBody(request);
   const name = clean(body.name, 100);
   if (!name) return json({ error: "กรุณากรอกชื่อห้องเรียน" }, 400);
+  const scheduleDays = normalizeDays(body.schedule_days);
+  const startTime = validTime(body.start_time);
   const result = await env.DB.prepare(`INSERT INTO classrooms(name, code, room, schedule_days, start_time, tenant_key, created_by) VALUES(?,?,?,?,?,?,?) RETURNING *`)
-    .bind(name, clean(body.code, 30), clean(body.room, 60), normalizeDays(body.schedule_days), clean(body.start_time, 5), auth.tenantKey, auth.sub).first();
+    .bind(name, clean(body.code, 30), clean(body.room, 60), scheduleDays, startTime, auth.tenantKey, auth.sub).first();
+  const days = scheduleDays.split(",").filter(Boolean).map(Number);
+  if (startTime && days.length) {
+    await env.DB.batch(days.map((weekday) => env.DB.prepare(`INSERT OR IGNORE INTO timetable_entries
+      (tenant_key,classroom_id,weekday,start_time,room,created_by) VALUES(?,?,?,?,?,?)`)
+      .bind(auth.tenantKey, result.id, weekday, startTime, result.room, auth.sub)));
+  }
   archiveMutation(env, ctx, "classroom.created", result);
   return json(result, 201);
 }
@@ -405,18 +437,108 @@ async function deleteClassroom(env, ctx, id, auth) {
   return json({ ok: true });
 }
 
+async function listStudentDirectory(db, url, auth) {
+  const query = clean(url.searchParams.get("q"), 100);
+  const like = `%${query.replaceAll("%", "\\%").replaceAll("_", "\\_")}%`;
+  const result = await db.prepare(`SELECT sp.*,COUNT(DISTINCT CASE WHEN ce.active=1 THEN ce.classroom_id END) classroom_count,
+      GROUP_CONCAT(DISTINCT CASE WHEN ce.active=1 THEN c.name END) classrooms
+    FROM student_profiles sp LEFT JOIN classroom_enrollments ce ON ce.student_id=sp.id
+    LEFT JOIN classrooms c ON c.id=ce.classroom_id
+    WHERE sp.tenant_key=? AND (?='' OR sp.name LIKE ? ESCAPE '\\' OR sp.student_code LIKE ? ESCAPE '\\' OR sp.homeroom LIKE ? ESCAPE '\\')
+    GROUP BY sp.id ORDER BY sp.active DESC,sp.name LIMIT 1000`).bind(auth.tenantKey, query, like, like, like).all();
+  return json(result.results);
+}
+
+async function createDirectoryStudent(request, env, ctx, auth) {
+  const denied = requireRosterAdmin(auth);
+  if (denied) return denied;
+  const body = await readBody(request);
+  const name = clean(body.name, 120);
+  const code = clean(body.student_code, 120);
+  if (!name) return json({ error: "กรุณากรอกชื่อ-นามสกุล" }, 400);
+  if (code && await env.DB.prepare("SELECT id FROM student_profiles WHERE tenant_key=? AND student_code=?").bind(auth.tenantKey, code).first()) {
+    return json({ error: "รหัสนักเรียนนี้มีอยู่ในทะเบียนกลางแล้ว" }, 409);
+  }
+  const student = await env.DB.prepare(`INSERT INTO student_profiles(tenant_key,student_code,name,homeroom,guardian_name,guardian_phone,note)
+    VALUES(?,?,?,?,?,?,?) RETURNING *`).bind(auth.tenantKey, code, name, clean(body.homeroom, 80), clean(body.guardian_name, 120), clean(body.guardian_phone, 40), clean(body.note, 250)).first();
+  archiveMutation(env, ctx, "student_directory.created", { ...student, created_by: auth.sub });
+  return json(student, 201);
+}
+
+async function updateDirectoryStudent(request, env, ctx, id, auth) {
+  const denied = requireRosterAdmin(auth);
+  if (denied) return denied;
+  const existing = await env.DB.prepare("SELECT * FROM student_profiles WHERE id=? AND tenant_key=?").bind(id, auth.tenantKey).first();
+  if (!existing) return json({ error: "ไม่พบนักเรียนในทะเบียนกลาง" }, 404);
+  const body = await readBody(request);
+  const name = clean(body.name, 120);
+  const code = clean(body.student_code, 120);
+  if (!name) return json({ error: "กรุณากรอกชื่อ-นามสกุล" }, 400);
+  if (code && await env.DB.prepare("SELECT id FROM student_profiles WHERE tenant_key=? AND student_code=? AND id<>?").bind(auth.tenantKey, code, id).first()) {
+    return json({ error: "รหัสนักเรียนนี้มีอยู่ในทะเบียนกลางแล้ว" }, 409);
+  }
+  const student = await env.DB.prepare(`UPDATE student_profiles SET student_code=?,name=?,homeroom=?,guardian_name=?,guardian_phone=?,note=?,active=?,updated_at=CURRENT_TIMESTAMP
+    WHERE id=? AND tenant_key=? RETURNING *`).bind(code, name, clean(body.homeroom, 80), clean(body.guardian_name, 120), clean(body.guardian_phone, 40), clean(body.note, 250), body.active === false || body.active === "0" ? 0 : 1, id, auth.tenantKey).first();
+  archiveMutation(env, ctx, "student_directory.updated", { ...student, updated_by: auth.sub });
+  return json(student);
+}
+
+async function archiveDirectoryStudent(env, ctx, id, auth) {
+  const denied = requireRosterAdmin(auth);
+  if (denied) return denied;
+  const student = await env.DB.prepare("SELECT * FROM student_profiles WHERE id=? AND tenant_key=?").bind(id, auth.tenantKey).first();
+  if (!student) return json({ error: "ไม่พบนักเรียนในทะเบียนกลาง" }, 404);
+  await env.DB.batch([
+    env.DB.prepare("UPDATE student_profiles SET active=0,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(id),
+    env.DB.prepare("UPDATE classroom_enrollments SET active=0,updated_at=CURRENT_TIMESTAMP WHERE student_id=?").bind(id),
+  ]);
+  archiveMutation(env, ctx, "student_directory.archived", { ...student, archived_by: auth.sub });
+  return json({ ok: true });
+}
+
+async function saveEnrollment(request, env, ctx, auth) {
+  const denied = requireRosterAdmin(auth);
+  if (denied) return denied;
+  const body = await readBody(request);
+  const classroomId = positiveInt(body.classroom_id);
+  const studentId = positiveInt(body.student_id);
+  const pair = await env.DB.prepare(`SELECT sp.id student_id,c.id classroom_id FROM student_profiles sp JOIN classrooms c
+    WHERE sp.id=? AND sp.tenant_key=? AND sp.active=1 AND c.id=? AND c.tenant_key=?`).bind(studentId, auth.tenantKey, classroomId, auth.tenantKey).first();
+  if (!pair) return json({ error: "ข้อมูลนักเรียนหรือห้องเรียนไม่ถูกต้อง" }, 404);
+  const enrollment = await env.DB.prepare(`INSERT INTO classroom_enrollments(classroom_id,student_id,student_no,active,updated_at)
+    VALUES(?,?,?,1,CURRENT_TIMESTAMP) ON CONFLICT(classroom_id,student_id) DO UPDATE SET
+    student_no=excluded.student_no,active=1,updated_at=CURRENT_TIMESTAMP RETURNING *`).bind(classroomId, studentId, clean(body.student_no, 20)).first();
+  archiveMutation(env, ctx, "enrollment.saved", { ...enrollment, updated_by: auth.sub });
+  return json(enrollment, 201);
+}
+
+async function removeEnrollment(env, ctx, url, auth) {
+  const denied = requireRosterAdmin(auth);
+  if (denied) return denied;
+  const classroomId = positiveInt(url.searchParams.get("classroom_id"));
+  const studentId = positiveInt(url.searchParams.get("student_id"));
+  const enrollment = await env.DB.prepare(`SELECT ce.* FROM classroom_enrollments ce JOIN classrooms c ON c.id=ce.classroom_id
+    WHERE ce.classroom_id=? AND ce.student_id=? AND c.tenant_key=?`).bind(classroomId, studentId, auth.tenantKey).first();
+  if (!enrollment) return json({ error: "ไม่พบการลงทะเบียน" }, 404);
+  await env.DB.prepare("UPDATE classroom_enrollments SET active=0,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(enrollment.id).run();
+  archiveMutation(env, ctx, "enrollment.removed", { ...enrollment, removed_by: auth.sub });
+  return json({ ok: true });
+}
+
 async function listStudents(db, url, auth) {
   const classroomId = positiveInt(url.searchParams.get("classroom_id"));
   if (!classroomId) return json({ error: "classroom_id ไม่ถูกต้อง" }, 400);
-  const result = await db.prepare(`SELECT s.*,
+  const result = await db.prepare(`SELECT sp.*,ce.student_no,ce.id enrollment_id,
       SUM(CASE WHEN a.status='present' THEN 1 ELSE 0 END) present_count,
       SUM(CASE WHEN a.status='late' THEN 1 ELSE 0 END) late_count,
       SUM(CASE WHEN a.status='absent' THEN 1 ELSE 0 END) absent_count,
       SUM(CASE WHEN a.status='leave' THEN 1 ELSE 0 END) leave_count,
       ROUND(100.0 * SUM(CASE WHEN a.status IN ('present','late') THEN 1 ELSE 0 END) / NULLIF(COUNT(a.id),0),1) attendance_rate
-    FROM students s JOIN classrooms c ON c.id=s.classroom_id LEFT JOIN attendance a ON a.student_id=s.id
-    WHERE s.classroom_id=? AND c.tenant_key=? GROUP BY s.id
-    ORDER BY CASE WHEN s.student_no='' THEN 1 ELSE 0 END, CAST(s.student_no AS INTEGER), s.name`).bind(classroomId, auth.tenantKey).all();
+    FROM classroom_enrollments ce JOIN student_profiles sp ON sp.id=ce.student_id JOIN classrooms c ON c.id=ce.classroom_id
+    LEFT JOIN attendance_sessions ss ON ss.classroom_id=ce.classroom_id
+    LEFT JOIN attendance a ON a.student_id=sp.id AND a.session_id=ss.id
+    WHERE ce.classroom_id=? AND ce.active=1 AND sp.active=1 AND c.tenant_key=? GROUP BY sp.id
+    ORDER BY CASE WHEN ce.student_no='' THEN 1 ELSE 0 END,CAST(ce.student_no AS INTEGER),sp.name`).bind(classroomId, auth.tenantKey).all();
   return json(result.results);
 }
 
@@ -430,52 +552,60 @@ async function createStudent(request, env, ctx, auth) {
   if (!classroomId || !name) return json({ error: "ข้อมูลนักเรียนไม่ครบถ้วน" }, 400);
   const classroom = await env.DB.prepare("SELECT id FROM classrooms WHERE id=? AND tenant_key=?").bind(classroomId, auth.tenantKey).first();
   if (!classroom) return json({ error: "ไม่พบห้องเรียน" }, 404);
-  if (studentCode) {
-    const duplicate = await env.DB.prepare("SELECT id FROM students WHERE classroom_id=? AND student_code=?").bind(classroomId, studentCode).first();
-    if (duplicate) return json({ error: "รหัสนักเรียนนี้มีอยู่ในห้องแล้ว" }, 409);
-  }
-  const result = await env.DB.prepare("INSERT INTO students(classroom_id, student_no, student_code, name, note) VALUES(?,?,?,?,?) RETURNING *")
-    .bind(classroomId, clean(body.student_no, 20), studentCode, name, clean(body.note, 250)).first();
+  let result = studentCode ? await env.DB.prepare("SELECT * FROM student_profiles WHERE tenant_key=? AND student_code=?").bind(auth.tenantKey, studentCode).first() : null;
+  if (!result) result = await env.DB.prepare("INSERT INTO student_profiles(tenant_key,student_code,name,note) VALUES(?,?,?,?) RETURNING *")
+    .bind(auth.tenantKey, studentCode, name, clean(body.note, 250)).first();
+  else result = await env.DB.prepare("UPDATE student_profiles SET name=?,note=?,active=1,updated_at=CURRENT_TIMESTAMP WHERE id=? RETURNING *")
+    .bind(name, clean(body.note, 250), result.id).first();
+  await env.DB.prepare(`INSERT INTO classroom_enrollments(classroom_id,student_id,student_no,active,updated_at) VALUES(?,?,?,1,CURRENT_TIMESTAMP)
+    ON CONFLICT(classroom_id,student_id) DO UPDATE SET student_no=excluded.student_no,active=1,updated_at=CURRENT_TIMESTAMP`)
+    .bind(classroomId, result.id, clean(body.student_no, 20)).run();
   archiveMutation(env, ctx, "student.created", result);
   return json(result, 201);
 }
 
-async function deleteStudent(env, ctx, id, auth) {
+async function deleteStudent(env, ctx, url, id, auth) {
   const denied = requireRosterAdmin(auth);
   if (denied) return denied;
-  const existing = await env.DB.prepare(`SELECT s.* FROM students s JOIN classrooms c ON c.id=s.classroom_id
-    WHERE s.id=? AND c.tenant_key=?`).bind(id, auth.tenantKey).first();
+  const classroomId = positiveInt(url.searchParams.get("classroom_id"));
+  const existing = await env.DB.prepare(`SELECT sp.*,ce.id enrollment_id FROM student_profiles sp JOIN classroom_enrollments ce ON ce.student_id=sp.id
+    JOIN classrooms c ON c.id=ce.classroom_id WHERE sp.id=? AND ce.classroom_id=? AND c.tenant_key=?`).bind(id, classroomId, auth.tenantKey).first();
   if (!existing) return json({ error: "ไม่พบนักเรียน" }, 404);
-  await env.DB.prepare("DELETE FROM students WHERE id=?").bind(id).run();
-  archiveMutation(env, ctx, "student.deleted", existing);
+  await env.DB.prepare("UPDATE classroom_enrollments SET active=0,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(existing.enrollment_id).run();
+  archiveMutation(env, ctx, "enrollment.removed", { ...existing, removed_by: auth.sub });
   return json({ ok: true });
 }
 
 async function updateStudent(request, env, ctx, id, auth) {
   const denied = requireRosterAdmin(auth);
   if (denied) return denied;
-  const existing = await env.DB.prepare(`SELECT s.* FROM students s JOIN classrooms c ON c.id=s.classroom_id
-    WHERE s.id=? AND c.tenant_key=?`).bind(id, auth.tenantKey).first();
-  if (!existing) return json({ error: "ไม่พบนักเรียน" }, 404);
   const body = await readBody(request);
+  const classroomId = positiveInt(body.classroom_id);
+  const existing = await env.DB.prepare(`SELECT sp.*,ce.id enrollment_id FROM student_profiles sp JOIN classroom_enrollments ce ON ce.student_id=sp.id
+    JOIN classrooms c ON c.id=ce.classroom_id WHERE sp.id=? AND ce.classroom_id=? AND c.tenant_key=?`).bind(id, classroomId, auth.tenantKey).first();
+  if (!existing) return json({ error: "ไม่พบนักเรียน" }, 404);
   const name = clean(body.name, 120);
   const studentCode = clean(body.student_code, 120);
   if (!name) return json({ error: "กรุณากรอกชื่อ-นามสกุล" }, 400);
   if (studentCode) {
-    const duplicate = await env.DB.prepare("SELECT id FROM students WHERE classroom_id=? AND student_code=? AND id<>?").bind(existing.classroom_id, studentCode, id).first();
+    const duplicate = await env.DB.prepare("SELECT id FROM student_profiles WHERE tenant_key=? AND student_code=? AND id<>?").bind(auth.tenantKey, studentCode, id).first();
     if (duplicate) return json({ error: "รหัสนักเรียนนี้มีอยู่ในห้องแล้ว" }, 409);
   }
-  const student = await env.DB.prepare(`UPDATE students SET student_no=?,student_code=?,name=?,note=? WHERE id=? RETURNING *`)
-    .bind(clean(body.student_no, 20), studentCode, name, clean(body.note, 250), id).first();
+  const student = await env.DB.prepare(`UPDATE student_profiles SET student_code=?,name=?,note=?,updated_at=CURRENT_TIMESTAMP WHERE id=? RETURNING *`)
+    .bind(studentCode, name, clean(body.note, 250), id).first();
+  await env.DB.prepare("UPDATE classroom_enrollments SET student_no=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(clean(body.student_no, 20), existing.enrollment_id).run();
   archiveMutation(env, ctx, "student.updated", { ...student, updated_by: auth.sub });
   return json(student);
 }
 
 async function studentHistory(db, id, auth) {
-  const student = await db.prepare(`SELECT s.*, c.name classroom_name FROM students s JOIN classrooms c ON c.id=s.classroom_id
-    WHERE s.id=? AND c.tenant_key=?`).bind(id, auth.tenantKey).first();
+  const student = await db.prepare(`SELECT sp.*,GROUP_CONCAT(DISTINCT c.name) classroom_name FROM student_profiles sp
+    LEFT JOIN classroom_enrollments ce ON ce.student_id=sp.id AND ce.active=1 LEFT JOIN classrooms c ON c.id=ce.classroom_id
+    WHERE sp.id=? AND sp.tenant_key=? GROUP BY sp.id`).bind(id, auth.tenantKey).first();
   if (!student) return json({ error: "ไม่พบนักเรียน" }, 404);
-  const history = await db.prepare(`SELECT ss.session_date, a.status, a.note FROM attendance a JOIN attendance_sessions ss ON ss.id=a.session_id WHERE a.student_id=? ORDER BY ss.session_date DESC LIMIT 180`).bind(id).all();
+  const history = await db.prepare(`SELECT ss.session_date,a.status,a.note,c.name classroom_name FROM attendance a
+    JOIN attendance_sessions ss ON ss.id=a.session_id JOIN classrooms c ON c.id=ss.classroom_id
+    WHERE a.student_id=? AND c.tenant_key=? ORDER BY ss.session_date DESC,c.name LIMIT 180`).bind(id, auth.tenantKey).all();
   const stats = await db.prepare(`SELECT
       SUM(status='present') present, SUM(status='late') late, SUM(status='absent') absent, SUM(status='leave') leave,
       ROUND(100.0 * SUM(status IN ('present','late')) / NULLIF(COUNT(*),0),1) rate FROM attendance WHERE student_id=?`).bind(id).first();
@@ -488,10 +618,12 @@ async function getAttendance(db, url, auth) {
   if (!classroomId) return json({ error: "classroom_id ไม่ถูกต้อง" }, 400);
   const classroom = await db.prepare("SELECT * FROM classrooms WHERE id=? AND tenant_key=?").bind(classroomId, auth.tenantKey).first();
   if (!classroom) return json({ error: "ไม่พบห้องเรียน" }, 404);
-  const students = await db.prepare(`SELECT s.*, COALESCE(a.status,'') status, COALESCE(a.note,'') attendance_note
-    FROM students s LEFT JOIN attendance_sessions ss ON ss.classroom_id=s.classroom_id AND ss.session_date=?
-    LEFT JOIN attendance a ON a.session_id=ss.id AND a.student_id=s.id WHERE s.classroom_id=?
-    ORDER BY CASE WHEN s.student_no='' THEN 1 ELSE 0 END, CAST(s.student_no AS INTEGER), s.name`).bind(date, classroomId).all();
+  const students = await db.prepare(`SELECT sp.*,ce.student_no,COALESCE(a.status,'') status,COALESCE(a.note,'') attendance_note
+    FROM classroom_enrollments ce JOIN student_profiles sp ON sp.id=ce.student_id
+    LEFT JOIN attendance_sessions ss ON ss.classroom_id=ce.classroom_id AND ss.session_date=?
+    LEFT JOIN attendance a ON a.session_id=ss.id AND a.student_id=sp.id
+    WHERE ce.classroom_id=? AND ce.active=1 AND sp.active=1
+    ORDER BY CASE WHEN ce.student_no='' THEN 1 ELSE 0 END,CAST(ce.student_no AS INTEGER),sp.name`).bind(date, classroomId).all();
   return json({ classroom, date, students: students.results });
 }
 
@@ -532,7 +664,7 @@ async function saveAttendance(request, env, ctx, auth) {
   const session = await env.DB.prepare(`INSERT INTO attendance_sessions(classroom_id, session_date, note) VALUES(?,?,?)
     ON CONFLICT(classroom_id,session_date) DO UPDATE SET note=excluded.note RETURNING id`).bind(classroomId, date, clean(body.note, 250)).first();
   const valid = new Set(["present", "late", "absent", "leave"]);
-  const roster = await env.DB.prepare("SELECT id FROM students WHERE classroom_id=?").bind(classroomId).all();
+  const roster = await env.DB.prepare("SELECT student_id id FROM classroom_enrollments WHERE classroom_id=? AND active=1").bind(classroomId).all();
   const allowedStudents = new Set(roster.results.map((student) => Number(student.id)));
   const records = body.records.filter((r) => allowedStudents.has(positiveInt(r.student_id)) && valid.has(r.status));
   if (records.length) {
@@ -553,8 +685,9 @@ async function scanStudentCard(request, env, ctx, auth) {
   const date = validDate(body.date) || bangkokDate();
   const studentCode = clean(body.student_code, 120);
   if (!classroomId || !studentCode) return json({ error: "ข้อมูลบัตรนักเรียนไม่ครบถ้วน" }, 400);
-  const matches = await env.DB.prepare(`SELECT s.id,s.name,s.student_no,s.student_code,c.name classroom_name FROM students s JOIN classrooms c ON c.id=s.classroom_id
-    WHERE s.classroom_id=? AND c.tenant_key=? AND s.student_code=? LIMIT 2`).bind(classroomId, auth.tenantKey, studentCode).all();
+  const matches = await env.DB.prepare(`SELECT sp.id,sp.name,ce.student_no,sp.student_code,c.name classroom_name
+    FROM classroom_enrollments ce JOIN student_profiles sp ON sp.id=ce.student_id JOIN classrooms c ON c.id=ce.classroom_id
+    WHERE ce.classroom_id=? AND ce.active=1 AND sp.active=1 AND c.tenant_key=? AND sp.student_code=? LIMIT 2`).bind(classroomId, auth.tenantKey, studentCode).all();
   if (!matches.results.length) return json({ error: `ไม่พบรหัสนักเรียน ${studentCode}`, code: "STUDENT_CODE_NOT_FOUND" }, 404);
   if (matches.results.length > 1) return json({ error: "พบรหัสนักเรียนซ้ำ กรุณาแก้ไขรายชื่อก่อนใช้งาน", code: "DUPLICATE_STUDENT_CODE" }, 409);
   const student = matches.results[0];
@@ -588,6 +721,71 @@ async function closeCheckinSession(env, ctx, id, auth) {
   return json({ ok: true });
 }
 
+async function listTimetable(db, auth) {
+  const result = await db.prepare(`SELECT te.*,c.name classroom_name,c.code classroom_code,
+      (SELECT COUNT(*) FROM classroom_enrollments ce WHERE ce.classroom_id=te.classroom_id AND ce.active=1) student_count
+    FROM timetable_entries te JOIN classrooms c ON c.id=te.classroom_id
+    WHERE te.tenant_key=? ORDER BY te.weekday,te.start_time,c.name`).bind(auth.tenantKey).all();
+  return json(result.results);
+}
+
+async function saveTimetableEntry(request, env, ctx, auth) {
+  const denied = requireRosterAdmin(auth);
+  if (denied) return denied;
+  const body = await readBody(request);
+  const id = positiveInt(body.id);
+  const classroomId = positiveInt(body.classroom_id);
+  const weekday = Number(body.weekday);
+  const startTime = validTime(body.start_time);
+  const endTime = body.end_time ? validTime(body.end_time) : "";
+  if (!classroomId || !Number.isInteger(weekday) || weekday < 0 || weekday > 6 || !startTime) {
+    return json({ error: "กรุณาระบุห้องเรียน วัน และเวลาเริ่มให้ครบถ้วน" }, 400);
+  }
+  if (body.end_time && !endTime) return json({ error: "เวลาสิ้นสุดไม่ถูกต้อง" }, 400);
+  if (endTime && endTime <= startTime) return json({ error: "เวลาสิ้นสุดต้องอยู่หลังเวลาเริ่ม" }, 400);
+  const classroom = await env.DB.prepare("SELECT id,name FROM classrooms WHERE id=? AND tenant_key=?").bind(classroomId, auth.tenantKey).first();
+  if (!classroom) return json({ error: "ไม่พบห้องเรียน" }, 404);
+  let entry;
+  try {
+    if (id) {
+      entry = await env.DB.prepare(`UPDATE timetable_entries SET classroom_id=?,weekday=?,start_time=?,end_time=?,room=?,teacher_name=?,active=?,updated_at=CURRENT_TIMESTAMP
+        WHERE id=? AND tenant_key=? RETURNING *`).bind(classroomId, weekday, startTime, endTime, clean(body.room, 80), clean(body.teacher_name, 120), body.active === false || body.active === "0" ? 0 : 1, id, auth.tenantKey).first();
+      if (!entry) return json({ error: "ไม่พบรายการในตารางเรียน" }, 404);
+    } else {
+      entry = await env.DB.prepare(`INSERT INTO timetable_entries(tenant_key,classroom_id,weekday,start_time,end_time,room,teacher_name,active,created_by)
+        VALUES(?,?,?,?,?,?,?,?,?) RETURNING *`).bind(auth.tenantKey, classroomId, weekday, startTime, endTime, clean(body.room, 80), clean(body.teacher_name, 120), body.active === false || body.active === "0" ? 0 : 1, auth.sub).first();
+    }
+  } catch (error) {
+    if (String(error?.message || "").includes("UNIQUE")) return json({ error: "ห้องเรียนนี้มีคาบในวันและเวลาเดียวกันแล้ว" }, 409);
+    throw error;
+  }
+  const today = bangkokDate();
+  const todayWeekday = new Date(`${today}T12:00:00+07:00`).getDay();
+  if (Number(entry.active) && weekday === todayWeekday) await materializeAttendanceSessions(env.DB, today, auth.tenantKey);
+  archiveMutation(env, ctx, id ? "timetable.updated" : "timetable.created", { ...entry, updated_by: auth.sub });
+  return json(entry, id ? 200 : 201);
+}
+
+async function deleteTimetableEntry(env, ctx, id, auth) {
+  const denied = requireRosterAdmin(auth);
+  if (denied) return denied;
+  const entry = await env.DB.prepare("SELECT * FROM timetable_entries WHERE id=? AND tenant_key=?").bind(id, auth.tenantKey).first();
+  if (!entry) return json({ error: "ไม่พบรายการในตารางเรียน" }, 404);
+  await env.DB.prepare("DELETE FROM timetable_entries WHERE id=? AND tenant_key=?").bind(id, auth.tenantKey).run();
+  archiveMutation(env, ctx, "timetable.deleted", { ...entry, deleted_by: auth.sub });
+  return json({ ok: true });
+}
+
+async function materializeAttendanceSessions(db, date, tenantKey = "") {
+  const weekday = new Date(`${date}T12:00:00+07:00`).getDay();
+  const query = tenantKey
+    ? db.prepare(`INSERT OR IGNORE INTO attendance_sessions(classroom_id,session_date,note)
+        SELECT DISTINCT classroom_id,?,'' FROM timetable_entries WHERE tenant_key=? AND weekday=? AND active=1`).bind(date, tenantKey, weekday)
+    : db.prepare(`INSERT OR IGNORE INTO attendance_sessions(classroom_id,session_date,note)
+        SELECT DISTINCT classroom_id,?,'' FROM timetable_entries WHERE weekday=? AND active=1`).bind(date, weekday);
+  await query.run();
+}
+
 async function checkinClaim(request, env, ctx) {
   const body = await readBody(request);
   const token = clean(body.token, 160);
@@ -597,11 +795,12 @@ async function checkinClaim(request, env, ctx) {
   const session = await env.DB.prepare(`SELECT cs.*,c.name classroom_name FROM checkin_sessions cs JOIN classrooms c ON c.id=cs.classroom_id
     WHERE cs.token_hash=?`).bind(tokenHash).first();
   if (!session || !Number(session.active) || Date.parse(session.expires_at) <= Date.now()) return json({ error: "QR นี้หมดอายุหรือปิดรับเช็คชื่อแล้ว", code: "CHECKIN_CLOSED" }, 410);
-  const student = await env.DB.prepare("SELECT id,name,student_no FROM students WHERE id=? AND classroom_id=?").bind(studentId, session.classroom_id).first();
+  const student = await env.DB.prepare(`SELECT sp.id,sp.name,ce.student_no FROM student_profiles sp JOIN classroom_enrollments ce ON ce.student_id=sp.id
+    WHERE sp.id=? AND ce.classroom_id=? AND ce.active=1 AND sp.active=1`).bind(studentId, session.classroom_id).first();
   if (!student) return json({ error: "ไม่พบนักเรียนในห้องนี้" }, 404);
   const device = await checkinDevice(request, env);
   const deviceHash = await sha256Hex(`${session.tenant_key}\0${device.id}`);
-  const binding = await env.DB.prepare(`SELECT cd.*,s.name student_name FROM checkin_devices cd JOIN students s ON s.id=cd.student_id
+  const binding = await env.DB.prepare(`SELECT cd.*,s.name student_name FROM checkin_devices cd JOIN student_profiles s ON s.id=cd.student_id
     WHERE cd.tenant_key=? AND cd.classroom_id=? AND cd.device_hash=?`).bind(session.tenant_key, session.classroom_id, deviceHash).first();
   if (binding && Number(binding.student_id) !== studentId) {
     const message = Date.parse(binding.reset_after) > Date.now()
@@ -699,9 +898,11 @@ async function createShare(request, env, ctx, origin, auth) {
   if (!classroomId) return json({ error: "ไม่พบห้องเรียน" }, 400);
   const classroom = await env.DB.prepare("SELECT name FROM classrooms WHERE id=? AND tenant_key=?").bind(classroomId, auth.tenantKey).first();
   if (!classroom) return json({ error: "ไม่พบห้องเรียน" }, 404);
-  const records = await env.DB.prepare(`SELECT s.name, s.student_no, COALESCE(a.status,'') status
-    FROM students s LEFT JOIN attendance_sessions ss ON ss.classroom_id=s.classroom_id AND ss.session_date=?
-    LEFT JOIN attendance a ON a.session_id=ss.id AND a.student_id=s.id WHERE s.classroom_id=? ORDER BY CAST(s.student_no AS INTEGER),s.name`).bind(date, classroomId).all();
+  const records = await env.DB.prepare(`SELECT sp.name,ce.student_no,COALESCE(a.status,'') status
+    FROM classroom_enrollments ce JOIN student_profiles sp ON sp.id=ce.student_id
+    LEFT JOIN attendance_sessions ss ON ss.classroom_id=ce.classroom_id AND ss.session_date=?
+    LEFT JOIN attendance a ON a.session_id=ss.id AND a.student_id=sp.id
+    WHERE ce.classroom_id=? AND ce.active=1 AND sp.active=1 ORDER BY CAST(ce.student_no AS INTEGER),sp.name`).bind(date, classroomId).all();
   const counts = { present: 0, late: 0, absent: 0, leave: 0, unmarked: 0 };
   records.results.forEach((row) => counts[row.status || "unmarked"]++);
   const payload = { classroom: classroom.name, date, counts, records: records.results };
@@ -735,8 +936,9 @@ async function renderCheckinPage(env, token) {
     WHERE cs.token_hash=?`).bind(tokenHash).first();
   const open = session && Number(session.active) && Date.parse(session.expires_at) > Date.now();
   if (!open) return new Response(checkinHtml("ปิดรับเช็คชื่อแล้ว", "QR นี้หมดอายุหรือครูปิดรับเช็คชื่อแล้ว", ""), { status: 410, headers: { "content-type": "text/html; charset=utf-8", "x-robots-tag": "noindex, nofollow", "cache-control": "no-store" } });
-  const students = await env.DB.prepare(`SELECT id,student_no,name FROM students WHERE classroom_id=?
-    ORDER BY CASE WHEN student_no='' THEN 1 ELSE 0 END,CAST(student_no AS INTEGER),name`).bind(session.classroom_id).all();
+  const students = await env.DB.prepare(`SELECT sp.id,ce.student_no,sp.name FROM classroom_enrollments ce JOIN student_profiles sp ON sp.id=ce.student_id
+    WHERE ce.classroom_id=? AND ce.active=1 AND sp.active=1
+    ORDER BY CASE WHEN ce.student_no='' THEN 1 ELSE 0 END,CAST(ce.student_no AS INTEGER),sp.name`).bind(session.classroom_id).all();
   const options = students.results.map((student) => `<option value="${student.id}">${escapeHtml(student.student_no ? `${student.student_no} · ` : "")}${escapeHtml(student.name)}</option>`).join("");
   const form = `<div class="session-meta"><i class="fa-regular fa-calendar" aria-hidden="true"></i><span>${escapeHtml(session.classroom_name)}</span><b>·</b><time datetime="${session.session_date}">${formatThaiDate(session.session_date)}</time></div><div class="form-area"><label for="student">เลือกชื่อของคุณ</label><select id="student"><option value="">— กรุณาเลือก —</option>${options}</select><button id="submit"><i class="fa-solid fa-check" aria-hidden="true"></i>ยืนยันการเข้าเรียน</button><div class="divider"><span>หรือ</span></div><button class="secondary" id="reset"><i class="fa-solid fa-qrcode" aria-hidden="true"></i>รีเซ็ตชื่อบนอุปกรณ์นี้</button><div class="security-note"><span class="security-icon"><i class="fa-solid fa-shield-halved" aria-hidden="true"></i></span><p>อุปกรณ์นี้จะผูกกับชื่อที่เลือกเป็นเวลา 7 วัน เพื่อป้องกันการเช็คชื่อแทนกัน และต้องกดรีเซ็ตก่อนจึงจะเปลี่ยนชื่อได้</p></div><p id="message" role="alert"></p></div><script>const token=${JSON.stringify(token)},message=document.getElementById('message');document.getElementById('submit').onclick=async()=>{const button=document.getElementById('submit'),student_id=Number(document.getElementById('student').value);if(!student_id){message.textContent='กรุณาเลือกชื่อของคุณ';return}button.disabled=true;message.textContent='กำลังบันทึก...';try{const response=await fetch('/api/checkin/claim',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token,student_id})});const data=await response.json();if(!response.ok)throw new Error(data.error||'บันทึกไม่สำเร็จ');const card=document.querySelector('.card');card.textContent='';const success=document.createElement('div');success.className='success';success.innerHTML='<i class="fa-solid fa-check" aria-hidden="true"></i>';const heading=document.createElement('h1');heading.textContent='เช็คชื่อสำเร็จ';const name=document.createElement('p');name.className='success-name';name.textContent=data.student.name;const room=document.createElement('p');room.className='session-meta success-meta';room.textContent=data.classroom;card.append(success,heading,name,room)}catch(error){message.textContent=error.message;button.disabled=false}};document.getElementById('reset').onclick=async()=>{if(!confirm('ต้องการรีเซ็ตชื่อที่ผูกกับอุปกรณ์นี้หรือไม่?'))return;message.textContent='กำลังตรวจสอบสิทธิ์รีเซ็ต...';try{const response=await fetch('/api/checkin/reset-device',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token})});const data=await response.json();if(!response.ok)throw new Error(data.error||'รีเซ็ตไม่สำเร็จ');message.textContent=data.reset?'รีเซ็ตแล้ว กรุณาเลือกชื่อใหม่':'อุปกรณ์นี้ยังไม่ได้ผูกกับชื่อ'}catch(error){message.textContent=error.message}}</script>`;
   return new Response(checkinHtml("เช็คชื่อเข้าเรียน", "เลือกชื่อและยืนยันด้วยอุปกรณ์ของคุณ", form), { headers: { "content-type": "text/html; charset=utf-8", "x-robots-tag": "noindex, nofollow", "cache-control": "private, no-store" } });
@@ -753,10 +955,12 @@ async function exportCsv(env, ctx, url, auth) {
   if (!classroomId) return json({ error: "classroom_id ไม่ถูกต้อง" }, 400);
   const classroom = await env.DB.prepare("SELECT name FROM classrooms WHERE id=? AND tenant_key=?").bind(classroomId, auth.tenantKey).first();
   if (!classroom) return json({ error: "ไม่พบห้องเรียน" }, 404);
-  const rows = await env.DB.prepare(`SELECT s.student_no,s.student_code,s.name,ss.session_date,a.status,a.note
-    FROM students s LEFT JOIN attendance a ON a.student_id=s.id LEFT JOIN attendance_sessions ss ON ss.id=a.session_id
-    WHERE s.classroom_id=? AND (ss.session_date BETWEEN ? AND ? OR ss.session_date IS NULL)
-    ORDER BY CAST(s.student_no AS INTEGER),s.name,ss.session_date`).bind(classroomId, from, to).all();
+  const rows = await env.DB.prepare(`SELECT ce.student_no,sp.student_code,sp.name,ss.session_date,a.status,a.note
+    FROM classroom_enrollments ce JOIN student_profiles sp ON sp.id=ce.student_id
+    LEFT JOIN attendance_sessions ss ON ss.classroom_id=ce.classroom_id AND ss.session_date BETWEEN ? AND ?
+    LEFT JOIN attendance a ON a.student_id=sp.id AND a.session_id=ss.id
+    WHERE ce.classroom_id=?
+    ORDER BY CAST(ce.student_no AS INTEGER),sp.name,ss.session_date`).bind(from, to, classroomId).all();
   const labels = { present: "มา", late: "สาย", absent: "ขาด", leave: "ลา" };
   const header = ["เลขที่", "รหัสนักเรียน", "ชื่อ-นามสกุล", "วันที่", "สถานะ", "หมายเหตุ"];
   const lines = [header, ...rows.results.map((r) => [r.student_no, r.student_code, r.name, r.session_date || "", labels[r.status] || "ยังไม่มีประวัติ", r.note || ""])];
@@ -876,9 +1080,9 @@ function studentTemplate(auth) {
   const denied = requireRosterAdmin(auth);
   if (denied) return denied;
   const csv = "\uFEFF" + [
-    ["student_no", "student_code", "name", "note"],
-    ["1", "66010001", "เด็กชายตัวอย่าง นักเรียน", ""],
-    ["2", "66010002", "เด็กหญิงตัวอย่าง ห้องเรียน", "แพ้อาหารทะเล"],
+    ["student_no", "student_code", "name", "homeroom", "guardian_name", "guardian_phone", "note"],
+    ["1", "66010001", "เด็กชายตัวอย่าง นักเรียน", "ม.1/1", "ผู้ปกครองตัวอย่าง", "0812345678", ""],
+    ["2", "66010002", "เด็กหญิงตัวอย่าง ห้องเรียน", "ม.1/1", "", "", "แพ้อาหารทะเล"],
   ].map((row) => row.map(csvCell).join(",")).join("\r\n");
   return new Response(csv, { headers: {
     "content-type": "text/csv; charset=utf-8",
@@ -905,18 +1109,33 @@ async function importStudents(request, env, ctx, auth) {
     const studentNo = clean(row?.student_no, 20);
     const studentCode = clean(row?.student_code, 120);
     const name = clean(row?.name, 120);
+    const homeroom = clean(row?.homeroom, 80);
+    const guardianName = clean(row?.guardian_name, 120);
+    const guardianPhone = clean(row?.guardian_phone, 40);
     const note = clean(row?.note, 250);
     if (!name) { skipped++; continue; }
-    const existing = await env.DB.prepare(`SELECT id FROM students WHERE classroom_id=? AND
-      ((student_code=? AND ?<>'') OR (student_no=? AND ?<>'')) ORDER BY student_code=? DESC LIMIT 1`)
-      .bind(classroomId, studentCode, studentCode, studentNo, studentNo, studentCode).first();
+    let existing = studentCode
+      ? await env.DB.prepare("SELECT id FROM student_profiles WHERE tenant_key=? AND student_code=?").bind(auth.tenantKey, studentCode).first()
+      : null;
+    if (!existing && studentNo) {
+      existing = await env.DB.prepare(`SELECT sp.id FROM classroom_enrollments ce JOIN student_profiles sp ON sp.id=ce.student_id
+        WHERE ce.classroom_id=? AND ce.student_no=? AND ce.active=1 LIMIT 1`).bind(classroomId, studentNo).first();
+    }
+    let studentId;
     if (existing) {
-      await env.DB.prepare("UPDATE students SET student_no=?,student_code=?,name=?,note=? WHERE id=?").bind(studentNo, studentCode, name, note, existing.id).run();
+      studentId = existing.id;
+      await env.DB.prepare(`UPDATE student_profiles SET student_code=?,name=?,homeroom=?,guardian_name=?,guardian_phone=?,note=?,active=1,updated_at=CURRENT_TIMESTAMP
+        WHERE id=? AND tenant_key=?`).bind(studentCode, name, homeroom, guardianName, guardianPhone, note, studentId, auth.tenantKey).run();
       updated++;
     } else {
-      await env.DB.prepare("INSERT INTO students(classroom_id,student_no,student_code,name,note) VALUES(?,?,?,?,?)").bind(classroomId, studentNo, studentCode, name, note).run();
+      const student = await env.DB.prepare(`INSERT INTO student_profiles(tenant_key,student_code,name,homeroom,guardian_name,guardian_phone,note)
+        VALUES(?,?,?,?,?,?,?) RETURNING id`).bind(auth.tenantKey, studentCode, name, homeroom, guardianName, guardianPhone, note).first();
+      studentId = student.id;
       inserted++;
     }
+    await env.DB.prepare(`INSERT INTO classroom_enrollments(classroom_id,student_id,student_no,active,updated_at)
+      VALUES(?,?,?,1,CURRENT_TIMESTAMP) ON CONFLICT(classroom_id,student_id) DO UPDATE SET
+      student_no=excluded.student_no,active=1,updated_at=CURRENT_TIMESTAMP`).bind(classroomId, studentId, studentNo).run();
   }
   const summary = { classroom_id: classroomId, classroom: classroom.name, inserted, updated, skipped, total: rows.length, imported_by: auth.sub };
   archiveMutation(env, ctx, "students.imported", summary);
@@ -1011,6 +1230,7 @@ async function sha256Hex(value) {
 }
 function clean(value, max) { return String(value ?? "").trim().slice(0, max); }
 function positiveInt(value) { const n = Number(value); return Number.isInteger(n) && n > 0 ? n : 0; }
+function validTime(value) { return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(value || "")) ? String(value) : ""; }
 function normalizeDays(value) { return String(value ?? "").split(",").map(Number).filter((n) => n >= 0 && n <= 6).filter((n, i, a) => a.indexOf(n) === i).join(","); }
 function validDate(value) { return /^\d{4}-\d{2}-\d{2}$/.test(String(value || "")) ? String(value) : ""; }
 function bangkokDate() { return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Bangkok", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()); }

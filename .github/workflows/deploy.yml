@@ -26,6 +26,9 @@ jobs:
       - name: Check Worker syntax
         run: node --input-type=module --check < worker.js
 
+      - name: Check frontend syntax
+        run: sed -n '/^<script>$/,/^<\/script>$/p' index.html | sed '1d;$d' | node --input-type=module --check
+
       - name: Check migration and Wrangler configuration
         run: |
           test -s migrations/0001_initial.sql
@@ -33,6 +36,7 @@ jobs:
           test -s migrations/0003_school_members.sql
           test -s migrations/0004_school_branding.sql
           test -s migrations/0005_qr_checkin.sql
+          test -s migrations/0006_phase1_school_operations.sql
           cp wrangler.toml wrangler.validation.toml
           sed -i "s|REPLACE_WITH_D1_DATABASE_ID|00000000-0000-0000-0000-000000000000|g" wrangler.validation.toml
           sed -i "s|REPLACE_WITH_AUTH0_CLIENT_ID|ci-auth0-client-id|g" wrangler.validation.toml

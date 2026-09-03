@@ -2,6 +2,9 @@ name = "classroom"
 main = "worker.js"
 compatibility_date = "2026-08-01"
 
+[triggers]
+crons = ["5 17 * * *"]
+
 [[routes]]
 pattern = "classroom.sorasukt.com"
 custom_domain = true
