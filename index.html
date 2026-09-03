@@ -39,6 +39,43 @@
     @media(max-width:760px){#studentQrModal{padding:8px}#studentQrModal .qr-flow-card{width:100%;height:calc(100dvh - 16px);max-height:none;padding:12px 14px}#studentQrModal .qr-flow-close{min-width:68px;padding:7px 13px}#studentQrModal .qr-flow-stage{grid-template-rows:minmax(0,1fr) auto;gap:8px;margin-top:6px}#studentQrModal .qr-flow-visual{min-height:0;height:100%;padding:10px 14px}#studentQrModal .qr-flow-copy{padding:8px 2px 2px}#studentQrModal .qr-flow-copy h2{font-size:clamp(20px,6vw,26px);margin-bottom:4px}#studentQrModal .qr-flow-copy p{font-size:14px;line-height:1.45}#studentQrModal .qr-flow-hint{margin-top:7px!important;font-size:12px!important}#studentQrModal .qr-flow-actions{position:static;padding-top:10px;gap:7px}#studentQrModal .qr-flow-actions .button{padding:8px 9px;font-size:13px}#studentQrModal .qr-setup-icon{font-size:min(18dvh,86px);margin-bottom:12px}#studentQrModal .qr-duration-wrap{gap:7px}#studentQrModal .qr-live-code{width:auto;min-width:210px;margin-bottom:8px;padding:4px 14px 6px}#studentQrModal .qr-live-code span{font-size:11px}#studentQrModal .qr-live-code b{font-size:28px}#studentQrModal .qr-flow-visual .teacher-qr{width:min(58vw,31dvh,250px)}#studentQrModal .qr-flow-visual .teacher-qr canvas,#studentQrModal .qr-flow-visual .teacher-qr img{max-height:31dvh}#studentQrModal .qr-expiry{margin:5px 0 0;font-size:11px}#studentQrModal .qr-closed{min-height:0;height:100%}#studentQrModal .qr-closed h2{font-size:25px}#studentQrModal .qr-closed p{font-size:14px}}
     @media(max-width:760px) and (max-height:620px){#studentQrModal .qr-flow-hint{display:none}#studentQrModal .qr-flow-visual .teacher-qr{width:min(44vw,24dvh,180px)}#studentQrModal .qr-flow-visual .teacher-qr canvas,#studentQrModal .qr-flow-visual .teacher-qr img{max-height:24dvh}#studentQrModal .qr-live-code{margin-bottom:4px}#studentQrModal .qr-flow-copy h2{font-size:20px}}
 
+    /* Match the supplied 1917×865 composition while scaling down without scrolling */
+    @media(min-width:761px){
+      #studentQrModal{background:#d7d4d4;padding:clamp(18px,8.2vh,70px) clamp(24px,8.1vw,156px)}
+      #studentQrModal .qr-flow-card{position:relative;width:100%;max-width:1605px;height:min(724px,83.7dvh);padding:0 36px 36px;border-radius:30px}
+      #studentQrModal .qr-flow-close{position:absolute;z-index:2;top:20px;left:34px;width:116px;min-width:116px;height:61px;padding:0;border-radius:20px;font-size:20px}
+      #studentQrModal .qr-flow-stage{grid-template-columns:46.2% 53.8%;gap:0;height:100%;margin:0}
+      #studentQrModal .qr-flow-copy{padding:clamp(92px,14vh,135px) clamp(28px,4vw,48px) 28px 44px}
+      #studentQrModal .qr-flow-copy h2{font-size:clamp(30px,2.05vw,39px);line-height:1.25;margin-bottom:8px}
+      #studentQrModal .qr-flow-copy p{font-size:clamp(17px,1.2vw,22px);line-height:1.65}
+      #studentQrModal .qr-flow-hint{margin-top:42px!important;font-size:clamp(13px,.95vw,17px)!important;line-height:1.55!important}
+      #studentQrModal .qr-flow-actions{width:min(456px,100%);margin-top:auto;padding-top:24px;gap:10px}
+      #studentQrModal .qr-flow-actions .button{height:50px;min-width:0;flex:1;border-radius:10px;font-size:17px}
+      #studentQrModal .qr-flow-visual{height:calc(100% - 40px);min-height:0;margin:20px 0 0;padding:22px;border-radius:34px}
+      #studentQrModal .qr-setup-icon{font-size:clamp(105px,8vw,145px);margin-bottom:42px}
+      #studentQrModal .qr-duration-wrap{width:224px;gap:17px}
+      #studentQrModal .qr-duration-wrap .input,#studentQrModal .qr-duration-wrap .button{height:50px;border-radius:10px;font-size:17px}
+      #studentQrModal .qr-live-code{width:336px;min-width:0;height:98px;margin:0 0 28px;padding:7px 18px;border-radius:19px}
+      #studentQrModal .qr-live-code span{font-size:15px}
+      #studentQrModal .qr-live-code b{font-size:42px;line-height:1.15;letter-spacing:.28em;padding-left:.28em}
+      #studentQrModal .qr-flow-visual .teacher-qr{width:min(420px,calc(83.7dvh - 260px));max-width:100%}
+      #studentQrModal .qr-flow-visual .teacher-qr canvas,#studentQrModal .qr-flow-visual .teacher-qr img{width:100%!important;max-width:100%;max-height:calc(83.7dvh - 260px)}
+      #studentQrModal .qr-expiry{margin:10px 0 0;font-size:13px}
+      #studentQrModal .qr-closed{height:100%;min-height:0}
+      #studentQrModal .qr-closed h2{font-size:38px;margin-bottom:9px}
+      #studentQrModal .qr-closed p{font-size:20px;line-height:1.55}
+    }
+    @media(min-width:761px) and (max-height:680px){
+      #studentQrModal{padding-block:12px}
+      #studentQrModal .qr-flow-card{height:calc(100dvh - 24px)}
+      #studentQrModal .qr-flow-copy{padding-top:80px}
+      #studentQrModal .qr-flow-hint{margin-top:18px!important}
+      #studentQrModal .qr-flow-visual .teacher-qr{width:min(330px,calc(100dvh - 260px))}
+      #studentQrModal .qr-flow-visual .teacher-qr canvas,#studentQrModal .qr-flow-visual .teacher-qr img{max-height:calc(100dvh - 260px)}
+      #studentQrModal .qr-live-code{height:76px;margin-bottom:12px}
+      #studentQrModal .qr-live-code b{font-size:32px}
+    }
+
   </style>
 </head>
 <body>
