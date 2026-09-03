@@ -207,6 +207,13 @@ Migration `0006_phase1_school_operations.sql` ย้ายรายชื่อ�
 
 Migration `0007_realtime_checkin_codes.sql` เพิ่มรหัสเข้ารอบ 5 หลัก ดัชนีค้นหารอบ และตารางจำกัดการลองรหัสผิด โดย route สาธารณะรองรับเฉพาะ `/checkin`, `/checkin/{token}` และ `/share/{token}` ส่วน route อื่นตอบหน้า 404
 
+## Brand Assets
+
+- `assets/classroom-logo.png` โลโก้หลักขนาด 512×512 สำหรับหน้าเว็บ หน้าเช็กชื่อ QR และหน้าสรุปที่แชร์ผ่าน LINE
+- `assets/favicon.png` favicon ขนาด 64×64
+- `assets/apple-touch-icon.png` ไอคอนสำหรับเพิ่มเว็บลงหน้าจอหลักบนอุปกรณ์ Apple ขนาด 180×180
+- พื้นที่โรงเรียนที่ตั้งค่าโลโก้ไว้ใน D1/R2 จะแสดงโลโก้โรงเรียนแทนโลโก้เริ่มต้นในส่วนที่รองรับ School Branding โดยยังคงเครดิต `Powered by /sorasukt Classroom`
+
 ## Local development
 
 ```bash
