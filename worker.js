@@ -1,3 +1,5 @@
+import CHECKIN_HTML from "./checkin.html";
+
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
 export default {
@@ -1041,9 +1043,7 @@ async function checkinAttemptKey(request, env) {
 }
 
 function checkinCodeHtml(message) {
-  const invalid = Boolean(message);
-  const form = `<form class="form-area code-form" method="get" action="/checkin"><label class="sr-only" for="code">รหัสเช็คชื่อ 5 หลัก</label><input class="code-input" id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{5}" maxlength="5" placeholder="00000" aria-label="รหัสเช็คชื่อ 5 หลัก" required><button type="submit" class="${invalid ? "danger" : ""}">${invalid ? "ไม่ถูกต้อง" : "ตกลง"}</button></form>`;
-  return checkinHtml("เช็คชื่อเข้าเรียน", invalid ? message : "กรอกรหัสที่แสดงบนหน้าจอของครู", form, invalid ? "error" : "");
+  return renderCheckinDocument({ mode: "code", message: message || "" });
 }
 
 function publicHtmlHeaders() {
@@ -1073,30 +1073,24 @@ async function renderCheckinPage(request, env, token) {
     JOIN student_profiles sp ON sp.id=cd.student_id JOIN classroom_enrollments ce ON ce.student_id=sp.id
     WHERE cd.tenant_key=? AND cd.classroom_id=? AND cd.device_hash=? AND ce.classroom_id=? AND ce.active=1 AND sp.active=1`)
     .bind(session.tenant_key, session.classroom_id, deviceHash, session.classroom_id).first();
-  const form = `<div class="form-area student-flow"><div id="studentFlow"></div><p id="message" role="alert"></p></div><script>
-  const token=${JSON.stringify(token)},savedStudentId=${bound ? Number(bound.id) : 0},savedStudentCode=${JSON.stringify(bound?.student_code || "")},savedStudentName=${JSON.stringify(bound?.name || "")},classroomName=${JSON.stringify(session.classroom_name)};
-  const flow=document.getElementById('studentFlow'),message=document.getElementById('message'),title=document.getElementById('pageTitle'),subtitle=document.getElementById('pageSubtitle');
-  const escapeText=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-  let pendingCode=savedStudentCode;
-  function setHeading(text,detail,tone=''){title.textContent=text;title.className=tone;subtitle.textContent=detail;subtitle.className=tone}
-  function bindEnter(){document.getElementById('student-code')?.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();beginConfirm()}})}
-  function renderEntry(error=''){setHeading('เช็คชื่อเข้าเรียน',error||'กรอกรหัสนักเรียนเพื่อเช็คชื่อ',error?'error':'');flow.innerHTML='<label class="sr-only" for="student-code">รหัสนักเรียน</label><input class="student-code" id="student-code" autocomplete="off" inputmode="text" placeholder="รหัสนักเรียน"><button id="start-checkin">เช็คชื่อ</button>';document.getElementById('start-checkin').onclick=beginConfirm;bindEnter();document.getElementById('student-code').focus()}
-  function beginConfirm(){const input=document.getElementById('student-code');pendingCode=(input?.value||pendingCode).trim();if(!pendingCode){renderEntry('กรุณากรอกรหัสนักเรียน');return}renderConfirm()}
-  function renderConfirm(){setHeading('เช็คชื่อเข้าเรียน','ตรวจสอบรหัสนักเรียนเพื่อเช็คชื่อ');flow.innerHTML='<div class="student-code code-preview">'+escapeText(pendingCode)+'</div><div class="confirm-actions"><button class="danger" id="change-code">กรอกใหม่</button><button id="confirm-checkin">เช็คชื่อ</button></div>';document.getElementById('change-code').onclick=changeCode;document.getElementById('confirm-checkin').onclick=submitCheckin}
-  async function changeCode(){if(!savedStudentId){renderEntry();return}message.textContent='กำลังตรวจสอบสิทธิ์เปลี่ยนรหัส...';try{const response=await fetch('/api/checkin/reset-device',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token})});const data=await response.json();if(!response.ok){renderLocked(data.error||'ยังไม่สามารถเปลี่ยนรหัสนักเรียนได้');return}if(data.reset)location.reload();else renderEntry()}catch(error){renderLocked(error.message)}}
-  function renderLocked(detail){setHeading('เช็คชื่อเข้าเรียน',detail,'error');flow.innerHTML='<div class="student-code code-preview">'+escapeText(pendingCode)+'</div><button id="locked-checkin">เช็คชื่อ</button>';document.getElementById('locked-checkin').onclick=submitCheckin;message.textContent=''}
-  function renderInvalid(detail){setHeading('เช็คชื่อเข้าเรียน',detail||'รหัสไม่ถูกต้อง โปรดตรวจสอบและแก้ไขใหม่อีกครั้ง','error');flow.innerHTML='<div class="student-code code-preview">'+escapeText(pendingCode)+'</div><button class="danger" id="invalid-code">ไม่ถูกต้อง</button>';document.getElementById('invalid-code').onclick=()=>renderEntry();message.textContent=''}
-  async function submitCheckin(){const button=document.getElementById('confirm-checkin')||document.getElementById('locked-checkin');if(button){button.disabled=true;button.textContent='กำลังเช็คชื่อ...'}message.textContent='';try{const response=await fetch('/api/checkin/claim',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token,student_id:savedStudentId,student_code:pendingCode})});const data=await response.json();if(!response.ok){renderInvalid(data.error);return}renderSuccess(data)}catch(error){renderInvalid(error.message)}}
-  function renderSuccess(data){setHeading('เช็คชื่อเข้าเรียนสำเร็จ',data.student.name+' ได้เช็คชื่อสำเร็จ','success-tone');flow.innerHTML='<div class="subject-box">'+escapeText(data.classroom||classroomName)+'</div>';message.textContent=''}
-  if(savedStudentId)renderConfirm();else renderEntry();
-  </script>`;
-  return new Response(checkinHtml("เช็คชื่อเข้าเรียน", bound ? "ตรวจสอบรหัสนักเรียนเพื่อเช็คชื่อ" : "กรอกรหัสนักเรียนเพื่อเช็คชื่อ", form), { headers: { "content-type": "text/html; charset=utf-8", "x-robots-tag": "noindex, nofollow", "cache-control": "private, no-store", "referrer-policy": "no-referrer" } });
+  const page = renderCheckinDocument({
+    mode: "student",
+    token,
+    savedStudentId: bound ? Number(bound.id) : 0,
+    savedStudentCode: bound?.student_code || "",
+    savedStudentName: bound?.name || "",
+    classroomName: session.classroom_name,
+  });
+  return new Response(page, { headers: { "content-type": "text/html; charset=utf-8", "x-robots-tag": "noindex, nofollow", "cache-control": "private, no-store", "referrer-policy": "no-referrer" } });
 }
 
 function checkinHtml(title, subtitle, content, tone = "") {
-  return `<!doctype html><html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="referrer" content="no-referrer"><title>${escapeHtml(title)} · /sorasukt Classroom</title><link rel="icon" type="image/png" sizes="64x64" href="https://sorasukt.com/classroom/assets/favicon.png"><link rel="apple-touch-icon" sizes="180x180" href="https://sorasukt.com/classroom/assets/apple-touch-icon.png"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600&family=Kanit:wght@500;600&display=swap" rel="stylesheet"><style>
-  :root{--ink:#111;--paper:#fff;--surface:#f7f7f6;--red:#ff3b30;--green:#18a63b;--line:#d8d8d5}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden}body{display:grid;place-items:center;padding:clamp(16px,6vh,56px) clamp(16px,8vw,96px);background:var(--surface);color:var(--ink);font-family:"IBM Plex Sans Thai",sans-serif;-webkit-font-smoothing:antialiased}main{display:grid;place-items:center;width:100%;height:100%}.card{display:flex;flex-direction:column;align-items:center;justify-content:center;width:min(960px,100%);height:min(620px,100%);padding:42px clamp(28px,5vw,64px);overflow:hidden;border:1px solid #ececea;border-radius:28px;background:var(--paper);box-shadow:0 24px 70px -56px rgba(0,0,0,.28);text-align:center}.logo{display:block;width:88px;height:88px;margin:0 0 24px;border-radius:11px;object-fit:cover}h1{margin:0;font:600 clamp(29px,2.4vw,38px)/1.18 Kanit;letter-spacing:-.02em}header>p{max-width:700px;margin:12px auto 0;color:#363532;font-size:clamp(17px,1.4vw,21px);line-height:1.45}.error{color:var(--red)!important}.success-tone{color:var(--green)!important}.checkin-content{width:100%}.form-area{width:min(500px,100%);margin:34px auto 0}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}input,.code-preview,.subject-box{display:flex;align-items:center;justify-content:center;width:100%;height:92px;padding:10px 24px;border:1px solid var(--line);border-radius:15px;background:#fff;color:var(--ink);text-align:center;transition:border-color .15s,box-shadow .15s}.code-input{font:600 clamp(40px,3.8vw,54px)/1 Kanit;letter-spacing:.45em;padding-left:calc(24px + .45em)}.student-code,.code-preview,.subject-box{font:600 clamp(22px,1.8vw,28px)/1.2 Kanit}.student-code::placeholder{color:#77746e;opacity:1}input:focus{border-color:#999690;outline:0;box-shadow:0 0 0 4px rgba(0,0,0,.06)}button{display:flex;align-items:center;justify-content:center;width:220px;height:56px;margin:20px auto 0;border:0;border-radius:18px;background:#111;color:#fff;font:600 clamp(20px,1.5vw,24px)/1 Kanit;cursor:pointer;transition:transform .12s,opacity .12s}button:hover{opacity:.86}button:active{transform:scale(.98)}button.danger{background:var(--red)}button:disabled{opacity:.55;cursor:wait}.confirm-actions{display:grid;grid-template-columns:1fr 1fr;gap:14px;width:min(456px,100%);margin:0 auto}.confirm-actions button{width:100%}.subject-box{margin-top:0}#message{min-height:0;margin:0;color:var(--red)}@media(max-height:680px){body{padding-block:12px}.card{height:100%;padding-block:24px}.logo{width:72px;height:72px;margin-bottom:14px}.form-area{margin-top:22px}input,.code-preview,.subject-box{height:76px}button{height:50px;margin-top:14px}}@media(max-width:700px){body{padding:10px}.card{width:100%;height:min(580px,100%);padding:28px 20px;border-radius:22px}.logo{width:76px;height:76px;margin-bottom:18px}h1{font-size:clamp(27px,8vw,34px)}header>p{margin-top:9px;font-size:clamp(16px,4.7vw,19px)}.form-area{width:min(420px,100%);margin-top:28px}input,.code-preview,.subject-box{height:78px;border-radius:13px;padding-inline:14px}.code-input{font-size:clamp(36px,11vw,48px);letter-spacing:.3em;padding-left:calc(14px + .3em)}.student-code,.code-preview,.subject-box{font-size:clamp(21px,6vw,26px)}button{width:min(220px,76%);height:52px;margin-top:17px;border-radius:17px;font-size:21px}.confirm-actions{gap:9px}.confirm-actions button{width:100%}}@media(max-width:700px) and (max-height:540px){.card{padding-block:16px}.logo{width:58px;height:58px;margin-bottom:8px}.form-area{margin-top:14px}header>p{margin-top:5px}input,.code-preview,.subject-box{height:62px}button{height:44px;margin-top:9px}}
-  </style></head><body><main><section class="card"><img class="logo" src="https://sorasukt.com/classroom/assets/classroom-logo.png" alt="โลโก้ Classroom by /sorasukt"><header><h1 id="pageTitle" class="${tone}">${escapeHtml(title)}</h1><p id="pageSubtitle" class="${tone}">${escapeHtml(subtitle)}</p></header><div class="checkin-content">${content}</div></section></main></body></html>`;
+  return renderCheckinDocument({ mode: "content", title, subtitle, content, tone });
+}
+
+function renderCheckinDocument(data) {
+  const bootstrap = JSON.stringify(data).replaceAll("<", "\\u003c");
+  return CHECKIN_HTML.replace("%%CHECKIN_BOOTSTRAP%%", bootstrap);
 }
 
 async function exportCsv(env, ctx, url, auth) {
