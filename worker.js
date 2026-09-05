@@ -1,4 +1,7 @@
 import CHECKIN_HTML from "./checkin.html";
+import STUDENT_HTML from "./student.html";
+import STUDENT_QR_JS from "./vendor/qrcode.js.txt";
+import { isStudentApi, handleStudentApi, cleanupStudentEvidence, studentAuthCallback, shouldRouteStudent, studentDeviceCookie } from "./phase2a.js";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
@@ -12,6 +15,10 @@ export default {
         if (!isKnownApiRoute(url.pathname, method.toUpperCase())) return withCors(json({ error: "ไม่พบเส้นทาง", code: "NOT_FOUND" }, 404), request, env);
         if (request.method === "OPTIONS") return corsPreflight(request, env);
         return withCors(await handleApi(request, env, ctx, url), request, env);
+      }
+      if (url.pathname === "/student/qr.js" && request.method === "GET") return new Response(STUDENT_QR_JS,{headers:{"content-type":"application/javascript; charset=utf-8","cache-control":"public, max-age=86400","x-content-type-options":"nosniff"}});
+      if (url.pathname === "/student" && request.method === "GET") {
+        return new Response(STUDENT_HTML, {headers:{"set-cookie":await studentDeviceCookie(request,env),"content-type":"text/html; charset=utf-8","cache-control":"no-store","referrer-policy":"no-referrer","x-content-type-options":"nosniff","x-frame-options":"DENY","content-security-policy":"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' blob: data: https://sorasukt.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"}});
       }
       if (url.pathname === "/checkin" && request.method === "GET") {
         return await renderCheckinCodePage(request, env, url);
@@ -30,6 +37,8 @@ export default {
     }
   },
   async scheduled(_controller, env, ctx) {
+    ctx.waitUntil(cleanupStudentEvidence(env));
+    if (_controller.cron === "* * * * *") return;
     ctx.waitUntil(Promise.all([
       materializeAttendanceSessions(env.DB, bangkokDate()),
       env.DB.prepare("UPDATE checkin_sessions SET active=0 WHERE active=1 AND expires_at<=?").bind(new Date().toISOString()).run(),
@@ -39,6 +48,7 @@ export default {
 };
 
 function isKnownApiRoute(path, method) {
+  if (isStudentApi(path, method)) return true;
   const exact = new Set([
     "GET /api/health", "GET /api/auth/login", "GET /api/auth/callback", "GET /api/auth/logout",
     "POST /api/checkin/claim", "POST /api/checkin/reset-device",
@@ -66,6 +76,7 @@ function isKnownApiRoute(path, method) {
 async function handleApi(request, env, ctx, url) {
   const method = request.method.toUpperCase();
   const path = url.pathname;
+  if (isStudentApi(path, method)) return handleStudentApi(request, env, ctx, {authorize, resolveSchoolAccess});
 
   if (path === "/api/health") return json({
     ok: Boolean(env.DB && env.EXPORTS),
@@ -80,6 +91,7 @@ async function handleApi(request, env, ctx, url) {
 
   const session = await authorize(request, env);
   if (!session) return json({ error: "กรุณาเข้าสู่ระบบ" }, 401);
+  if (await shouldRouteStudent(env.DB, session)) return json({error:"บัญชีนี้ใช้พื้นที่นักเรียน",code:"STUDENT_PORTAL",studentUrl:url.origin+"/student"},403);
   const auth = await resolveSchoolAccess(env.DB, session);
   if (path === "/api/session" && method === "GET") return json({ user: auth });
   if (auth.schoolDomain && !auth.schoolAccess) {
@@ -155,7 +167,7 @@ async function handleApi(request, env, ctx, url) {
 async function beginAuth(url, env) {
   const config = authConfig(env);
   if (!config.ok) return json({ error: config.error }, 503);
-  const state = crypto.randomUUID().replaceAll("-", "");
+  const state = crypto.randomUUID().replaceAll("-", "") + (url.searchParams.get("student") === "1" ? "~student" : "");
   const signedState = `${state}.${await sign(state, await sessionSigningSecret(env))}`;
   const callback = `${url.origin}/api/auth/callback`;
   const target = new URL(`${config.issuer}/authorize`);
@@ -214,6 +226,7 @@ async function finishAuth(request, url, env) {
     roles: extractRoles(profile),
     exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7,
   });
+  if (state.endsWith("~student") || await shouldRouteStudent(env.DB, session)) return studentAuthCallback(env, session, url.origin);
   const encoded = base64UrlEncode(JSON.stringify(session));
   const value = `${encoded}.${await sign(encoded, await sessionSigningSecret(env))}`;
   return new Response(null, {
