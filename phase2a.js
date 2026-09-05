@@ -91,11 +91,21 @@ async function myContext(env,session){
   return reply({authenticated:true,mode:'code',name:room.student_name,rooms:[{id:room.id,name:room.name}],applications:[],staff:false});
  }
  if(!session.verified)return reply({authenticated:true,mode:'auth',verified:false,name:session.name,rooms:[],applications:[],staff:false});
- const rooms=rows(await env.DB.prepare(`SELECT c.id,c.name FROM student_room_members m JOIN classrooms c ON c.id=m.classroom_id JOIN student_account_bindings b ON b.student_id=m.student_id AND b.tenant_key=c.tenant_key AND b.sub=m.sub JOIN student_profiles p ON p.id=m.student_id JOIN classroom_enrollments e ON e.classroom_id=c.id AND e.student_id=m.student_id WHERE m.sub=? AND m.reauth_after<=? AND m.active=1 AND b.active=1 AND p.active=1 AND e.active=1`).bind(session.sub,session.created_at).all());
- const applications=rows(await env.DB.prepare(`SELECT a.id,a.status,a.require_evidence,a.created_at,c.name classroom_name FROM student_applications a JOIN classrooms c ON c.id=a.classroom_id WHERE a.sub=? ORDER BY a.created_at DESC LIMIT 100`).bind(session.sub).all());
+ const rooms=rows(await env.DB.prepare(`SELECT c.id,c.name,c.tenant_key,p.student_code FROM student_room_members m JOIN classrooms c ON c.id=m.classroom_id JOIN student_account_bindings b ON b.student_id=m.student_id AND b.tenant_key=c.tenant_key AND b.sub=m.sub JOIN student_profiles p ON p.id=m.student_id JOIN classroom_enrollments e ON e.classroom_id=c.id AND e.student_id=m.student_id WHERE m.sub=? AND m.reauth_after<=? AND m.active=1 AND b.active=1 AND p.active=1 AND e.active=1`).bind(session.sub,session.created_at).all());
+ const applications=rows(await env.DB.prepare(`SELECT a.id,a.status,a.require_evidence,a.created_at,c.name classroom_name,c.tenant_key FROM student_applications a JOIN classrooms c ON c.id=a.classroom_id WHERE a.sub=? ORDER BY a.created_at DESC LIMIT 100`).bind(session.sub).all());
  for(const app of applications)app.evidence=rows(await env.DB.prepare(`SELECT id,expires_at,state FROM student_evidence WHERE application_id=? AND state<>'deleted'`).bind(app.id).all());
+ // Build the school directory only from this student's authorized rooms and own requests.
+ const schools=[];
+ for(const tenant of new Set([...rooms,...applications].map(r=>r.tenant_key))){
+  const setting=await env.DB.prepare('SELECT organization_name FROM tenant_settings WHERE tenant_key=?').bind(tenant).first();
+  const school={id:await hash(tenant),name:setting?.organization_name?.trim()||(tenant.startsWith('school:')?tenant.slice(7):'พื้นที่การเรียนรู้ของครู'),room_count:0,pending_count:0};
+  for(const room of rooms.filter(r=>r.tenant_key===tenant)){room.school_id=school.id;delete room.tenant_key;school.room_count++;}
+  for(const app of applications.filter(a=>a.tenant_key===tenant)){app.school_id=school.id;delete app.tenant_key;if(['pending','more'].includes(app.status))school.pending_count++;}
+  schools.push(school);
+ }
+ schools.sort((a,b)=>a.name.localeCompare(b.name,'th')||a.id.localeCompare(b.id));
  const staff=await env.DB.prepare('SELECT 1 FROM student_review_teachers WHERE sub=? LIMIT 1').bind(session.sub).first();
- return reply({authenticated:true,mode:'auth',verified:Boolean(session.verified),name:session.name,rooms,applications,staff:Boolean(staff)});
+ return reply({authenticated:true,mode:'auth',verified:Boolean(session.verified),name:session.name,rooms,applications,schools,staff:Boolean(staff)});
 }
 async function ownApplication(env,session,application){
  if(!session?.sub||!session.verified)fail('กรุณาเข้าสู่ระบบและยืนยันอีเมล',401);
