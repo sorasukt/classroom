@@ -4,11 +4,11 @@ compatibility_date = "2026-08-01"
 
 [[rules]]
 type = "Text"
-globs = ["**/*.html"]
+globs = ["**/*.html", "**/*.js.txt"]
 fallthrough = true
 
 [triggers]
-crons = ["5 17 * * *"]
+crons = ["5 17 * * *", "* * * * *"]
 
 [[routes]]
 pattern = "classroom.sorasukt.com"

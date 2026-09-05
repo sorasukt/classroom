@@ -23,8 +23,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Setup Node.js for tests
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Install test dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Test student access and UI
+        run: npm test
+
       - name: Check Worker syntax
-        run: node --input-type=module --check < worker.js
+        run: |
+          node --check worker.js
+          node --check phase2a.js
 
       - name: Check frontend syntax
         run: sed -n '/^<script>$/,/^<\/script>$/p' index.html | sed '1d;$d' | node --input-type=module --check
@@ -38,6 +51,7 @@ jobs:
           test -s migrations/0005_qr_checkin.sql
           test -s migrations/0006_phase1_school_operations.sql
           test -s migrations/0007_realtime_checkin_codes.sql
+          test -s migrations/0008_phase2a_student_access.sql
           cp wrangler.toml wrangler.validation.toml
           sed -i "s|REPLACE_WITH_D1_DATABASE_ID|00000000-0000-0000-0000-000000000000|g" wrangler.validation.toml
           sed -i "s|REPLACE_WITH_AUTH0_CLIENT_ID|ci-auth0-client-id|g" wrangler.validation.toml
