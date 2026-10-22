@@ -1,5 +1,8 @@
 import CHECKIN_HTML from "./checkin.html";
 import STUDENT_HTML from "./student.html";
+import PRACTICUM_HTML from "./practicum.html";
+import PRACTICUM_JS from "./practicum.js.txt";
+import { isPracticumApi, handlePracticumApi } from "./practicum-api.js";
 import STUDENT_QR_JS from "./vendor/qrcode.js.txt";
 import { isStudentApi, handleStudentApi, cleanupStudentEvidence, studentAuthCallback, shouldRouteStudent, studentDeviceCookie } from "./phase2a.js";
 
@@ -17,6 +20,10 @@ export default {
         return withCors(await handleApi(request, env, ctx, url), request, env);
       }
       if (url.pathname === "/student/qr.js" && request.method === "GET") return new Response(STUDENT_QR_JS,{headers:{"content-type":"application/javascript; charset=utf-8","cache-control":"public, max-age=86400","x-content-type-options":"nosniff"}});
+      if (url.pathname === "/practicum.js" && request.method === "GET") return new Response(PRACTICUM_JS, {headers:{"content-type":"application/javascript; charset=utf-8","cache-control":"no-store","x-content-type-options":"nosniff"}});
+      if (url.pathname === "/practicum" && request.method === "GET") {
+        return new Response(PRACTICUM_HTML, {headers:{"content-type":"text/html; charset=utf-8","cache-control":"no-store","referrer-policy":"no-referrer","x-content-type-options":"nosniff","x-frame-options":"DENY","content-security-policy":"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"}});
+      }
       if (url.pathname === "/student" && request.method === "GET") {
         return new Response(STUDENT_HTML, {headers:{"set-cookie":await studentDeviceCookie(request,env),"content-type":"text/html; charset=utf-8","cache-control":"no-store","referrer-policy":"no-referrer","x-content-type-options":"nosniff","x-frame-options":"DENY","content-security-policy":"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' blob: data: https://sorasukt.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"}});
       }
@@ -48,7 +55,7 @@ export default {
 };
 
 function isKnownApiRoute(path, method) {
-  if (isStudentApi(path, method)) return true;
+  if (isStudentApi(path, method) || isPracticumApi(path, method)) return true;
   const exact = new Set([
     "GET /api/health", "GET /api/auth/login", "GET /api/auth/callback", "GET /api/auth/logout",
     "POST /api/checkin/claim", "POST /api/checkin/reset-device",
@@ -76,6 +83,7 @@ function isKnownApiRoute(path, method) {
 async function handleApi(request, env, ctx, url) {
   const method = request.method.toUpperCase();
   const path = url.pathname;
+  if (isPracticumApi(path, method)) return handlePracticumApi(request, env, { authorize });
   if (isStudentApi(path, method)) return handleStudentApi(request, env, ctx, {authorize, resolveSchoolAccess});
 
   if (path === "/api/health") return json({
@@ -167,7 +175,7 @@ async function handleApi(request, env, ctx, url) {
 async function beginAuth(url, env) {
   const config = authConfig(env);
   if (!config.ok) return json({ error: config.error }, 503);
-  const state = crypto.randomUUID().replaceAll("-", "") + (url.searchParams.get("student") === "1" ? "~student" : "");
+  const state = crypto.randomUUID().replaceAll("-", "") + (url.searchParams.get("practicum") === "1" ? "~practicum" : url.searchParams.get("student") === "1" ? "~student" : "");
   const signedState = `${state}.${await sign(state, await sessionSigningSecret(env))}`;
   const callback = `${url.origin}/api/auth/callback`;
   const target = new URL(`${config.issuer}/authorize`);
@@ -226,9 +234,15 @@ async function finishAuth(request, url, env) {
     roles: extractRoles(profile),
     exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7,
   });
-  if (state.endsWith("~student") || await shouldRouteStudent(env.DB, session)) return studentAuthCallback(env, session, url.origin);
+  if (state.endsWith("~student") || (!state.endsWith("~practicum") && await shouldRouteStudent(env.DB, session))) return studentAuthCallback(env, session, url.origin);
   const encoded = base64UrlEncode(JSON.stringify(session));
   const value = `${encoded}.${await sign(encoded, await sessionSigningSecret(env))}`;
+  if (state.endsWith("~practicum")) {
+    const headers = new Headers({ location: `${url.origin}/practicum`, "cache-control": "no-store" });
+    headers.append("set-cookie", `classroom_session=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`);
+    headers.append("set-cookie", "classroom_auth_state=; Path=/api/auth/callback; HttpOnly; Secure; SameSite=Lax; Max-Age=0");
+    return new Response(null, { status: 302, headers });
+  }
   return new Response(null, {
     status: 302,
     headers: {
