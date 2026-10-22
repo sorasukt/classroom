@@ -81,7 +81,7 @@ export async function handlePracticumApi(request, env, { authorize }) {
       return json({ok:true,id:rowId,hours});
     }
     const result=await env.DB.prepare("INSERT INTO practicum_logs(user_sub,work_date,time_in,time_out,activity,reflection,hours,status) VALUES(?,?,?,?,?,?,?,'draft')")
-      .bind(auth.sub,workDate,timeIn,timeOut,activity,reflection,hours,auth.sub).run();
+      .bind(auth.sub,workDate,timeIn,timeOut,activity,reflection,hours).run();
     return json({ok:true,id:result.meta?.last_row_id,hours});
   }
   return json({ error: "ไม่พบเส้นทาง", code: "NOT_FOUND" }, 404);
