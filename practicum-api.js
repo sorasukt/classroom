@@ -65,6 +65,14 @@ export async function handlePracticumApi(request, env, { authorize }) {
   }
   if (url.pathname === "/api/practicum/logbook" && request.method === "POST") {
     let body; try { body = await request.json(); } catch { return json({ error: "ข้อมูลไม่ถูกต้อง" }, 400); }
+    if (body.action === "submit") {
+      const logId = Number(body.id);
+      if (!Number.isSafeInteger(logId) || logId < 1) return json({ error: "รายการไม่ถูกต้อง" }, 400);
+      const old = await env.DB.prepare("SELECT status FROM practicum_logs WHERE id=? AND user_sub=?").bind(logId,auth.sub).first();
+      if (!old || old.status !== "draft") return json({ error: "ส่งตรวจได้เฉพาะรายการฉบับร่างของตนเอง" }, 403);
+      await env.DB.prepare("UPDATE practicum_logs SET status='submitted',updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_sub=?").bind(logId,auth.sub).run();
+      return json({ ok: true, id: logId, status: "submitted" });
+    }
     const workDate = text(body.work_date,10), timeIn=text(body.time_in,5), timeOut=text(body.time_out,5);
     const activity=text(body.activity,1800), reflection=text(body.reflection,1800);
     if (!validDate(workDate) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(timeIn) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(timeOut) || !activity) return json({ error: "กรุณาตรวจวันที่ เวลา และกิจกรรมให้ครบถ้วน" },400);
