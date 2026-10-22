@@ -4,7 +4,30 @@ const json = (data, status = 200) => new Response(JSON.stringify(data), {
 const text = (value, max = 4000) => String(value ?? "").trim().slice(0, max);
 const allowedDocs = new Set(["school_observation", "assistant_teacher_report", "daily_logbook"]);
 const statuses = new Set(["draft", "submitted", "needs_revision", "approved"]);
-const validDate = value => /^\d{4}-\d{2}-\d{2}$/.test(String(value || "")) && !Number.isNaN(Date.parse(value));
+const validDate = value => {
+  const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return false;
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  return date.getUTCFullYear() === Number(match[1]) && date.getUTCMonth() === Number(match[2]) - 1 && date.getUTCDate() === Number(match[3]);
+};
+async function parseBody(request, max = 35000) {
+  if (Number(request.headers.get("content-length") || 0) > max) throw new Error("PAYLOAD_TOO_LARGE");
+  const reader = request.body?.getReader();
+  if (!reader) return {};
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) { await reader.cancel(); throw new Error("PAYLOAD_TOO_LARGE"); }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
 
 export function isPracticumApi(path, method) {
   return (path === "/api/practicum/me" && method === "GET")
@@ -33,7 +56,7 @@ export async function handlePracticumApi(request, env, { authorize }) {
   }
   if (url.pathname === "/api/practicum/portfolio" && request.method === "POST") {
     let body;
-    try { body = await request.json(); } catch { return json({ error: "ข้อมูลไม่ถูกต้อง" }, 400); }
+    try { body = await parseBody(request); } catch (error) { return json({ error: error.message === "PAYLOAD_TOO_LARGE" ? "ข้อมูลมีขนาดใหญ่เกินกำหนด" : "ข้อมูลไม่ถูกต้อง" }, error.message === "PAYLOAD_TOO_LARGE" ? 413 : 400); }
     const key = text(body.document_key, 40);
     if (!allowedDocs.has(key)) return json({ error: "ไม่พบประเภทเอกสาร" }, 400);
     const title = text(body.title, 180);
