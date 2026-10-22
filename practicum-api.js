@@ -79,7 +79,7 @@ export async function handlePracticumApi(request, env, { authorize }) {
     return json({ logs, total_hours: Math.round(logs.filter(x=>x.status!=="needs_revision").reduce((n,x)=>n+Number(x.hours||0),0)*100)/100 });
   }
   if (url.pathname === "/api/practicum/logbook/delete") {
-    let body; try { body = await request.json(); } catch { return json({ error: "ข้อมูลไม่ถูกต้อง" }, 400); }
+    let body; try { body = await parseBody(request); } catch (error) { return json({ error: error.message === "PAYLOAD_TOO_LARGE" ? "ข้อมูลมีขนาดใหญ่เกินกำหนด" : "ข้อมูลไม่ถูกต้อง" }, error.message === "PAYLOAD_TOO_LARGE" ? 413 : 400); }
     const id = Number(body.id);
     if (!Number.isSafeInteger(id) || id < 1) return json({ error: "รายการไม่ถูกต้อง" }, 400);
     const result = await env.DB.prepare("DELETE FROM practicum_logs WHERE id=? AND user_sub=? AND status IN ('draft','needs_revision')").bind(id,auth.sub).run();
@@ -87,7 +87,7 @@ export async function handlePracticumApi(request, env, { authorize }) {
     return json({ ok: true });
   }
   if (url.pathname === "/api/practicum/logbook" && request.method === "POST") {
-    let body; try { body = await request.json(); } catch { return json({ error: "ข้อมูลไม่ถูกต้อง" }, 400); }
+    let body; try { body = await parseBody(request); } catch (error) { return json({ error: error.message === "PAYLOAD_TOO_LARGE" ? "ข้อมูลมีขนาดใหญ่เกินกำหนด" : "ข้อมูลไม่ถูกต้อง" }, error.message === "PAYLOAD_TOO_LARGE" ? 413 : 400); }
     if (body.action === "submit") {
       const logId = Number(body.id);
       if (!Number.isSafeInteger(logId) || logId < 1) return json({ error: "รายการไม่ถูกต้อง" }, 400);
