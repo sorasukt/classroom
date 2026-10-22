@@ -6,6 +6,7 @@ import {setup,apply,jpg} from './helpers.mjs';
 import {handleStudentApi,cleanupStudentEvidence,studentDeviceCookie} from '../phase2a.js';
 let source=readFileSync('worker.js','utf8').replace(/import (\w+) from "(.*\.(?:html|txt))";/g,(_,name,path)=>'const '+name+'='+JSON.stringify(readFileSync(path,'utf8'))+';');
 source=source.replace('"./phase2a.js"',JSON.stringify(new URL('../phase2a.js',import.meta.url).href));
+source=source.replace('"./practicum-api.js"',JSON.stringify(new URL('../practicum-api.js',import.meta.url).href));
 const worker=(await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'))).default;
 function token(env,sub){const secret=createHash('sha256').update('sorasukt-classroom-session-v1\0'+env.AUTH0_CLIENT_SECRET).digest('hex');const body=Buffer.from(JSON.stringify({sub,name:sub,email:sub+'@gmail.com',emailVerified:true,exp:Date.now()/1000+3600})).toString('base64url');return body+'.'+createHmac('sha256',secret).update(body).digest('hex');}
 test('actual Worker enforces student/teacher boundary and keeps unknown routes as 404',async()=>{const f=setup();await f.settings();await apply(f,await f.auth());const request=(path,headers={})=>new Request('https://classroom.test'+path,{headers});const ctx={waitUntil(){}};
