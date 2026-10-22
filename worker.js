@@ -173,7 +173,7 @@ async function handleApi(request, env, ctx, url) {
 async function beginAuth(url, env) {
   const config = authConfig(env);
   if (!config.ok) return json({ error: config.error }, 503);
-  const state = crypto.randomUUID().replaceAll("-", "") + (url.searchParams.get("student") === "1" ? "~student" : "");
+  const state = crypto.randomUUID().replaceAll("-", "") + (url.searchParams.get("practicum") === "1" ? "~practicum" : url.searchParams.get("student") === "1" ? "~student" : "");
   const signedState = `${state}.${await sign(state, await sessionSigningSecret(env))}`;
   const callback = `${url.origin}/api/auth/callback`;
   const target = new URL(`${config.issuer}/authorize`);
@@ -232,9 +232,14 @@ async function finishAuth(request, url, env) {
     roles: extractRoles(profile),
     exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7,
   });
-  if (state.endsWith("~student") || await shouldRouteStudent(env.DB, session)) return studentAuthCallback(env, session, url.origin);
+  if (state.endsWith("~student") || (!state.endsWith("~practicum") && await shouldRouteStudent(env.DB, session))) return studentAuthCallback(env, session, url.origin);
   const encoded = base64UrlEncode(JSON.stringify(session));
   const value = `${encoded}.${await sign(encoded, await sessionSigningSecret(env))}`;
+  if (state.endsWith("~practicum")) return new Response(null, { status: 302, headers: {
+    location: `${url.origin}/practicum`,
+    "set-cookie": [`classroom_session=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`, "classroom_auth_state=; Path=/api/auth/callback; HttpOnly; Secure; SameSite=Lax; Max-Age=0"],
+    "cache-control": "no-store",
+  }});
   return new Response(null, {
     status: 302,
     headers: {
