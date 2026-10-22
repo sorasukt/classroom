@@ -1,5 +1,7 @@
 import CHECKIN_HTML from "./checkin.html";
 import STUDENT_HTML from "./student.html";
+import PRACTICUM_HTML from "./practicum.html";
+import { isPracticumApi, handlePracticumApi } from "./practicum-api.js";
 import STUDENT_QR_JS from "./vendor/qrcode.js.txt";
 import { isStudentApi, handleStudentApi, cleanupStudentEvidence, studentAuthCallback, shouldRouteStudent, studentDeviceCookie } from "./phase2a.js";
 
@@ -17,6 +19,9 @@ export default {
         return withCors(await handleApi(request, env, ctx, url), request, env);
       }
       if (url.pathname === "/student/qr.js" && request.method === "GET") return new Response(STUDENT_QR_JS,{headers:{"content-type":"application/javascript; charset=utf-8","cache-control":"public, max-age=86400","x-content-type-options":"nosniff"}});
+      if (url.pathname === "/practicum" && request.method === "GET") {
+        return new Response(PRACTICUM_HTML, {headers:{"content-type":"text/html; charset=utf-8","cache-control":"no-store","referrer-policy":"no-referrer","x-content-type-options":"nosniff","x-frame-options":"DENY","content-security-policy":"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"}});
+      }
       if (url.pathname === "/student" && request.method === "GET") {
         return new Response(STUDENT_HTML, {headers:{"set-cookie":await studentDeviceCookie(request,env),"content-type":"text/html; charset=utf-8","cache-control":"no-store","referrer-policy":"no-referrer","x-content-type-options":"nosniff","x-frame-options":"DENY","content-security-policy":"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' blob: data: https://sorasukt.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"}});
       }
@@ -48,7 +53,7 @@ export default {
 };
 
 function isKnownApiRoute(path, method) {
-  if (isStudentApi(path, method)) return true;
+  if (isStudentApi(path, method) || isPracticumApi(path, method)) return true;
   const exact = new Set([
     "GET /api/health", "GET /api/auth/login", "GET /api/auth/callback", "GET /api/auth/logout",
     "POST /api/checkin/claim", "POST /api/checkin/reset-device",
@@ -76,6 +81,7 @@ function isKnownApiRoute(path, method) {
 async function handleApi(request, env, ctx, url) {
   const method = request.method.toUpperCase();
   const path = url.pathname;
+  if (isPracticumApi(path, method)) return handlePracticumApi(request, env, { authorize });
   if (isStudentApi(path, method)) return handleStudentApi(request, env, ctx, {authorize, resolveSchoolAccess});
 
   if (path === "/api/health") return json({
